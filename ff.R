@@ -1,6 +1,7 @@
 options(stringsAsFactors = FALSE)
 
-downloadData <- function(){
+
+downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   
   
   require(XML)
@@ -111,10 +112,7 @@ downloadData <- function(){
   te_fp$FPTS <- as.numeric(te_fp$FPTS)
   
   
-  qbrepl <- 14
-  rbrepl <- 38
-  wrrepl <- 38
-  terepl <-12
+ 
   
   # qbrepl <- 17
   # rbrepl <- 35
@@ -233,13 +231,11 @@ downloadData <- function(){
   all$Player <- str_replace(all$Player, "'", '')
   all$Pos <- as.character(all$Pos)
   
-  all$drafted <- 0
-  DST$drafted <- 0
-  k <- drafted <- 0
-  
   all$team <- NA
   DST$team <- NA
   k$team <- NA
+  
+  all$Rnk <- 1:nrow(all)
   
   outList <- list(players = all, 
                   def = DST,
@@ -247,6 +243,35 @@ downloadData <- function(){
   
   return(outList)
 }
+
+nextRndPick <- function(tms, currentTeam, Rnd){
+  pickIndex <- which(tms$team == currentTeam)
+  direction <- ifelse(Rnd %% 2 == 0, -1, 1)
+  newRnd <- Rnd
+  newPick <- pickIndex + 1
+  if(direction == 1 & pickIndex == nrow(tms)){
+    newRnd <- Rnd + 1
+    newPick <- 1
+  } 
+  if(direction == -1 & pickIndex == 1){
+    newRnd <- Rnd + 1
+    newPick <- 1
+  }
+  return(c(Rnd = newRnd, Pck = newPick))
+}
+
+nextPick <- function(tms, currentTeam, Rnd){
+  pickIndex <- which(tms$team == currentTeam)
+  direction <- ifelse(Rnd %% 2 == 0, -1, 1)
+  if(direction == 1 & pickIndex == nrow(tms)){
+    direction <- 0
+  } 
+  if(direction == -1 & pickIndex == 1){
+    direction <-0
+  }
+  tms[pickIndex + direction, 'team']
+}
+
 
 # 
 # library(RMySQL)
