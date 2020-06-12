@@ -124,6 +124,8 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   wr_fp <- wr_fp[order(wr_fp$FPTS, decreasing = TRUE),]
   te_fp <- te_fp[order(te_fp$FPTS, decreasing = TRUE),]
   
+  
+  ## Calculate Replacement Levels
   qbr <- mean(qb_fp[qbrepl, 'FPTS'], qb_fp[qbrepl+1,'FPTS'], qb_fp[qbrepl-1,'FPTS'])
   rbr <- mean(rb_fp[rbrepl, 'FPTS'], rb_fp[rbrepl+1,'FPTS'], rb_fp[rbrepl-1,'FPTS'])
   wrr <- mean(wr_fp[wrrepl, 'FPTS'], wr_fp[wrrepl+1,'FPTS'], wr_fp[wrrepl-1,'FPTS'])
@@ -134,13 +136,12 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   wr_fp$VORP <- wr_fp$FPTS - wrr
   te_fp$VORP <- te_fp$FPTS - ter
   
-  cols <- c('#8A0808','#2ECCFA','#F7FE2E','#A4A4A4','#FF00FF','#FF8000','#0000FF',
-            '#FF0000','#81F781','#086A87','#000000')
-  cols <- rep(cols, 4)
-  qb_fp$cluster <- cols[kmeans(qb_fp[,c('VORP')], 10)$cluster]
-  rb_fp$cluster <- cols[kmeans(rb_fp$VORP,10)$cluster]
-  wr_fp$cluster <- cols[kmeans(wr_fp$VORP, 10)$cluster]
-  te_fp$cluster <- cols[kmeans(te_fp$VORP, 10)$cluster]
+  
+  
+  qb_fp$cluster <- clusterPlayers(qb_fp, 10)
+  rb_fp$cluster <- clusterPlayers(rb_fp, 10)
+  wr_fp$cluster <- clusterPlayers(wr_fp, 10)
+  te_fp$cluster <- clusterPlayers(te_fp, 10)
   
   fp_all <- rbind(qb_fp[,c('Player','FPTS','Pos','VORP','cluster')], rb_fp[,c('Player','FPTS','Pos','VORP','cluster')],wr_fp[,c('Player','FPTS','Pos','VORP','cluster')], te_fp[,c('Player','FPTS','Pos','VORP','cluster')])
   
@@ -235,7 +236,17 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   DST$team <- NA
   k$team <- NA
   
+  all$Rnd <- NA
+  all$Pck <- NA
+  DST$Rnd <- NA
+  DST$Pck <- NA
+  k$Rnd <- NA
+  k$Pck <- NA
+  
   all$Rnk <- 1:nrow(all)
+  
+  all <- all %>% mutate(PlayerName = tolower(str_replace(trimws(substring(Player, 1, nchar(Player)-3)), ' ', '-')),
+             PlayerLink = paste0('<a href = "https://www.fantasypros.com/nfl/projections/', PlayerName, '.php" target="_blank">', Player, '</a>'))
   
   outList <- list(players = all, 
                   def = DST,
@@ -244,19 +255,26 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   return(outList)
 }
 
+
 nextRndPick <- function(tms, currentTeam, Rnd){
   pickIndex <- which(tms$team == currentTeam)
   direction <- ifelse(Rnd %% 2 == 0, -1, 1)
+  
+  if(direction == -1){
+    pickIndex <- nrow(tms) - pickIndex + 1
+  }
   newRnd <- Rnd
   newPick <- pickIndex + 1
-  if(direction == 1 & pickIndex == nrow(tms)){
+  if(direction == 1 & pickIndex >= nrow(tms)){
     newRnd <- Rnd + 1
     newPick <- 1
   } 
-  if(direction == -1 & pickIndex == 1){
+  if(direction == -1 & pickIndex >= nrow(tms)){
     newRnd <- Rnd + 1
     newPick <- 1
   }
+  
+  
   return(c(Rnd = newRnd, Pck = newPick))
 }
 
@@ -272,6 +290,14 @@ nextPick <- function(tms, currentTeam, Rnd){
   tms[pickIndex + direction, 'team']
 }
 
+clusterPlayers <- function(players, n = 10){
+  kmeansOut <- kmeans(players[,c('VORP')], n)
+  Clusters <- data.frame(orig = 1:nrow(kmeansOut$centers), val = kmeansOut$centers)
+  Clusters <- Clusters %>% arrange(desc(val))
+  Clusters$new <- 1:nrow(Clusters)
+  data.frame(orig = kmeansOut$cluster) %>% inner_join(Clusters, by = 'orig') %>% select(new) %>% unlist()
+  
+}
 
 # 
 # library(RMySQL)
