@@ -13,6 +13,7 @@ source('ff.R')
 
 ui <- fluidPage(
   tags$script(HTML("$(function(){ 
+
       $(document).keyup(function(e) {
       if (e.which == 13) {
         $('#selectPlayer').click()
@@ -28,11 +29,14 @@ ui <- fluidPage(
           selectInput("CurrentTeam", choices = NA, label = "Current"),
           selectInput("ViewTeam", choices = NA, label = "View Roster"),
           downloadButton('downloadData', 'Download Draft Board/Results'),
+          actionButton("queue", "Add to Queue"),
+          actionButton("remove", "Remove from Queue"),
           DT::dataTableOutput("drafted")
       )),
       
     mainPanel(
       textOutput("Round"),
+      textOutput("TeamPos"),
       tabsetPanel(
         id = "displayType",
         tabPanel("LeagueSetup",
@@ -49,7 +53,9 @@ ui <- fluidPage(
                  h1("Instructions"),
                  p("Input team names, separated by commas, in the order in which they are drafting and click the 'Generate Board' button."),
                  p("You can change the replacement levels used to generate ranking above as well."),
-                 p("Once you generate the board, you can see available players on the other tabs.")
+                 p("Once you generate the board, you can see available players on the other tabs."),
+                 h1("Continue Old Draft"),
+                 fileInput("oldData", label = "Upload csv file")
                  ),
         tabPanel("Available",
                  DT::dataTableOutput('players')
@@ -88,11 +94,20 @@ server <- function(input, output, session){
                       , teams = data.frame()
                       , Rnd = 1
                       , Pck = 1
+                      , rem = NA
                       )
   
   
   observeEvent(input$download, {
     dat <- downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl)
+    
+    if(!is.null(input$oldData)){
+      oldData <- read.csv(input$oldData$datapath)
+      dat$players <- dat$players %>% select(-team, -Rnd, -Pck) %>% inner_join(oldData %>% select(Player, Pos, team = Team, Rnd, Pck), by = c('Player','Pos'))
+      dat$def <- dat$def %>% mutate(Pos = 'Def') %>% select(-team, -Rnd, -Pck) %>% inner_join(oldData %>% select(Player, Pos, team = Team, Rnd, Pck), by = c('Player','Pos'))
+      dat$kickers <- dat$kickers %>% mutate(Pos = 'K') %>% select(-team, -Rnd, -Pck) %>% inner_join(oldData %>% select(Player, Pos, team = Team, Rnd, Pck), by = c('Player','Pos'))
+    }
+    
     v$players <- dat$players
     v$defense <- dat$def
     v$kickers <- dat$kickers
@@ -103,19 +118,46 @@ server <- function(input, output, session){
     tms <- str_split(input$TeamNames, ", ")[[1]]
     v$teams <- data.frame(teamNum = 1:length(tms), team = tms)
     
+    
+    
     updateSelectInput(session, 'MyTeam', choices = tms)
     updateSelectInput(session, 'CurrentTeam', choices = tms, selected = tms[1])
-    updateSelectInput(session, 'ViewTeam', choices = c(tms, 'All'), selected = input$MyTeam)
+    updateSelectInput(session, 'ViewTeam', choices = c(tms, 'All', 'Queue'), selected = input$MyTeam)
+  })
+  
+  observeEvent(input$queue,{
+    if(input$displayType == 'Available'){
+      v$players[is.na(v$players$team),][input$players_rows_selected,'queue'] <- TRUE
+    } else if(input$displayType == "Defense"){
+      v$draftedDef[input$defense_rows_selected] <- TRUE
+      v$defense[is.na(v$defense$team),][input$defense_rows_selected,c('team','Rnd','Pck')] <- c(input$CurrentTeam, v$Rnd, v$Pck)
+    } else if(input$displayType == 'Kickers'){
+      v$kickers[is.na(v$kickers$team),][input$kickers_rows_selected] <- TRUE
+      v$kickers[is.na(v$kickers$team),][input$kickers_rows_selected,c('team','Rnd','Pck')] <- c(input$CurrentTeam, v$Rnd, v$Pck)
+    }
+  })
+  
+  observeEvent(input$remove, {
+    
+      pl <- v$players %>% filter(queue) %>% select(Player, Team = team, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
+      d  <- v$defense %>% filter(queue) %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck)
+      k <- v$kickers  %>% filter(queue) %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck) 
+      
+      out <- bind_rows(pl, d, k)  %>% arrange(desc(Rnd), desc(Pck))
+      
+    
+      player <- (out[input$drafted_rows_selected, 'Player'])
+      pos <- (out[input$drafted_rows_selected, 'Pos'])
+      
+      if(pos == 'Def'){
+        v$defense[v$defense$Player == player] <- FALSE
+      } else if(pos == 'K'){
+        v$kickers[v$kickers$Player == player] <- FALSE
+      } else{
+        v$players[v$players$Player == player & v$players$Pos == pos, 'queue'] <- FALSE
+      }
     
     
-    # isolate({
-    #   players <- dat$players
-    #   kickers <- dat$k
-    #   def <- dat$def
-    # })
-    # players(dat$players)
-    # kickers(dat$k)
-    # def(dat$def)
   })
   
   observeEvent(input$selectPlayer, {
@@ -138,9 +180,34 @@ server <- function(input, output, session){
     v$Rnd <- as.numeric(nxtPickRnd['Rnd'])
     v$Pck <- as.numeric(nxtPickRnd['Pck'])
     
+    
+    
   })
   
-  output$Round <- renderText(paste0("Round: ", v$Rnd, " Pick: ", v$Pck, " Team: ", input$CurrentTeam))
+  output$Round <- renderText({
+    paste0("Round: ", v$Rnd, " Pick: ", v$Pck, " Team: ", input$CurrentTeam)
+  })
+  
+  output$TeamPos <- renderText({
+    if(nrow(v$players) > 0){
+      pl <- v$players  %>% select(Player, team, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
+      d  <- v$defense %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, team, Pos, VORP, Rnd, Pck)
+      k <- v$kickers %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, team, Pos, VORP, Rnd, Pck) 
+      
+      out <- bind_rows(pl, d, k) %>% filter(team == input$MyTeam) 
+      
+      positions <- data.frame(Pos = c('QB','RB','WR','TE','Def','K'))
+      
+      byPos <- positions %>% left_join(out %>% group_by(Pos) %>% summarise(num = n()), by = 'Pos') %>% mutate(num = ifelse(is.na(num), 0, num))
+      
+      return(paste0('Team by Position: ', 
+             paste0(byPos$Pos, ': ', byPos$num, collapse = " "))  )
+    } else {
+      return("")
+    }
+    
+  }
+    )
   
   output$players <- DT::renderDataTable({
     if(nrow(v$players) > 0){
@@ -183,6 +250,13 @@ server <- function(input, output, session){
         
         out <- bind_rows(pl, d, k) %>% filter(!is.na(Team)) %>% arrange(desc(Rnd), desc(Pck))
         
+      } else if(input$ViewTeam == 'Queue'){
+        pl <- v$players %>% filter(queue) %>% select(Player, Team = team, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
+        d  <- v$defense %>% filter(queue) %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck)
+        k <- v$kickers  %>% filter(queue) %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck) 
+        
+        out <- bind_rows(pl, d, k)  %>% arrange(desc(Rnd), desc(Pck))
+        
       } else{
         
         pl <- v$players %>% filter(team == input$ViewTeam) %>% select(Player, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
@@ -192,7 +266,13 @@ server <- function(input, output, session){
         out <- bind_rows(pl, d, k)  
       }
       
-      datatable(out)
+      if(input$ViewTeam == 'Queue'){
+        datatable(out,
+                  selection = 'single')
+      } else{
+        datatable(out,selection = 'single')  
+      }
+      
     }
   })
   
@@ -226,7 +306,12 @@ server <- function(input, output, session){
       paste('data-', Sys.Date(), '.csv', sep='')
     },
     content = function(con) {
-      write.csv(v$players, con)
+      pl <- v$players %>% select(Player, Team = team, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
+      d  <- v$defense %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck)
+      k <- v$kickers  %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, Team = team, Pos, Rnd, Pck) 
+      
+      out <- bind_rows(pl, d, k) %>% arrange(desc(Rnd), desc(Pck))
+      write.csv(out, con)
     }
   )
   

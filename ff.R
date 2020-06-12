@@ -242,6 +242,9 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   DST$Pck <- NA
   k$Rnd <- NA
   k$Pck <- NA
+  all$queue <- FALSE
+  DST$queue <- FALSE
+  k$queue <- FALSE
   
   all$Rnk <- 1:nrow(all)
   
@@ -250,7 +253,11 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   
   outList <- list(players = all, 
                   def = DST,
-                  kickers = k)
+                  kickers = k,
+                  qbr = qbr,
+                  rbr = rbr,
+                  wrr = wrr,
+                  ter = ter)
   
   return(outList)
 }
