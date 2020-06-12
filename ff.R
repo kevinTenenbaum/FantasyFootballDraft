@@ -1,7 +1,9 @@
 options(stringsAsFactors = FALSE)
 
 
-downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
+downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
+                         PassYds = 1/20, PassTD = 4, INT = -2, RYDS = 1/10, 
+                         RTDS = 6, FL = -2, REC = 1, RecYds = 1/10, RecTDs = 6){
   
   
   require(XML)
@@ -55,27 +57,28 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12){
   qb_fp[,'YDS'] <- gsub(",", "", qb_fp[,'YDS'], fixed = TRUE)
   qb_fp[,'RYDS'] <- gsub(",", "", qb_fp[,'RYDS'], fixed = TRUE) 
   for(i in 1:nrow(qb_fp)){
-    qb_fp[i,'FPTS'] <- c(1/20,4,-2,1/10,6,-2)%*%as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')])
+    qb_fp[i,'FPTS'] <- c(PassYds,PassTD,INT,RYDS,RTDS,FL)%*%as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')])
   }
+  
   
   colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
   rb_fp[,'YDS'] <- gsub(",", "", rb_fp[,'YDS'], fixed = TRUE) 
   rb_fp[,'RYDS']<- gsub(",", "", rb_fp[,'RYDS'], fixed = TRUE) 
   
   for(i in 1:nrow(rb_fp)){
-    rb_fp[i,'FPTS'] <- c(1/10,6,1/10,6,-2,1)%*%as.numeric(rb_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
+    rb_fp[i,'FPTS'] <- c(RYDS,RTDS,RecYds,RecTDs,FL, REC)%*%as.numeric(rb_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
   }
   
   # colnames(wr_fp) <- colnames(rb_fp)
   wr_fp[,'YDS'] <- gsub(",", "", wr_fp[,'YDS'], fixed = TRUE) 
   wr_fp[,'RYDS']<- gsub(",", "", wr_fp[,'RYDS'], fixed = TRUE) 
   for(i in 1:nrow(wr_fp)){
-    wr_fp[i,'FPTS'] <- c(1/10,6,1/10,6,-2,1)%*%as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
+    wr_fp[i,'FPTS'] <- c(RecYds,RecTDs,RYDS,RTDS,FL,REC)%*%as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
   }
   
   te_fp[,'YDS'] <- gsub(",", "", te_fp[,'YDS'], fixed = TRUE) 
   for(i in 1:nrow(te_fp)){
-    te_fp[i,'FPTS'] <- c(1/10,6,-2,1)%*%as.numeric(te_fp[i,c('YDS','TDS','FL','REC')])
+    te_fp[i,'FPTS'] <- c(RecYds,RecTDs,FL,REC)%*%as.numeric(te_fp[i,c('YDS','TDS','FL','REC')])
   }
   
   k.names <- c()
