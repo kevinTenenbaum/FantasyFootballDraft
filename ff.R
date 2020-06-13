@@ -1,15 +1,29 @@
 options(stringsAsFactors = FALSE)
+require(XML)
+require(stringr)
+require(rvest)
+require(dplyr)
 
+# downloadData()$players %>% head(20)
+
+# input <- list(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
+#               PtsPassYd = 1/20, PtsPassTD = 4, PtsINT = -2, PtsRYDS = .1, PtsRTDs = 6,
+#               PtsFL = -2, PtsREC = 1, PtsRecYds = .1, PtsRecTDS = 6)
+# 
+# attach(list(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
+#             PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
+#             RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS))
+# 
+# downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
+#              PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
+#              RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)$players %>% select(-PlayerLink) %>% arrange(desc(VORP)) #%>% filter(Pos == 'RB')
 
 downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
                          PassYds = 1/20, PassTD = 4, INT = -2, RYDS = 1/10, 
                          RTDS = 6, FL = -2, REC = 1, RecYds = 1/10, RecTDs = 6){
   
   
-  require(XML)
-  require(stringr)
-  require(rvest)
-  require(dplyr)
+  
   
   scrapeTable <- function(url){
     site <- read_html(url)
@@ -56,8 +70,11 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
   qb_fp[,'YDS'] <- gsub(",", "", qb_fp[,'YDS'], fixed = TRUE)
   qb_fp[,'RYDS'] <- gsub(",", "", qb_fp[,'RYDS'], fixed = TRUE) 
+  
+  
   for(i in 1:nrow(qb_fp)){
-    qb_fp[i,'FPTS'] <- c(PassYds,PassTD,INT,RYDS,RTDS,FL)%*%as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')])
+    
+    qb_fp[i,'FPTS'] <- sum(c(PassYds,PassTD,INT,RYDS,RTDS,FL)*as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')]))
   }
   
   
@@ -66,19 +83,21 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   rb_fp[,'RYDS']<- gsub(",", "", rb_fp[,'RYDS'], fixed = TRUE) 
   
   for(i in 1:nrow(rb_fp)){
-    rb_fp[i,'FPTS'] <- c(RYDS,RTDS,RecYds,RecTDs,FL, REC)%*%as.numeric(rb_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
+    rb_fp[i,'FPTS'] <- sum(c(RYDS,RTDS,RecYds,RecTDs,FL, REC)*as.numeric(rb_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')]))
   }
   
   # colnames(wr_fp) <- colnames(rb_fp)
   wr_fp[,'YDS'] <- gsub(",", "", wr_fp[,'YDS'], fixed = TRUE) 
   wr_fp[,'RYDS']<- gsub(",", "", wr_fp[,'RYDS'], fixed = TRUE) 
+  
+  
   for(i in 1:nrow(wr_fp)){
-    wr_fp[i,'FPTS'] <- c(RecYds,RecTDs,RYDS,RTDS,FL,REC)%*%as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')])
+    wr_fp[i,'FPTS'] <- sum(c(RecYds,RecTDs,RYDS,RTDS,FL,REC)*as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')]))
   }
   
   te_fp[,'YDS'] <- gsub(",", "", te_fp[,'YDS'], fixed = TRUE) 
   for(i in 1:nrow(te_fp)){
-    te_fp[i,'FPTS'] <- c(RecYds,RecTDs,FL,REC)%*%as.numeric(te_fp[i,c('YDS','TDS','FL','REC')])
+    te_fp[i,'FPTS'] <- sum(c(RecYds,RecTDs,FL,REC)*as.numeric(te_fp[i,c('YDS','TDS','FL','REC')]))
   }
   
   k.names <- c()
@@ -138,7 +157,6 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   rb_fp$VORP <- rb_fp$FPTS - rbr
   wr_fp$VORP <- wr_fp$FPTS - wrr
   te_fp$VORP <- te_fp$FPTS - ter
-  
   
   
   qb_fp$cluster <- clusterPlayers(qb_fp, 10)

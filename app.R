@@ -40,33 +40,40 @@ ui <- fluidPage(
       tabsetPanel(
         id = "displayType",
         tabPanel("LeagueSetup",
-                 
-                 h1("Input Team Names"),
-                 textInput("TeamNames", label = "Team Names", "Team1, Team2, Team3, Team4, Team5"),
-                 textOutput('nTeams'),
-                 br(),
-                 h1("Set Replacement Levels"),
-                 numericInput("qbrepl", label = "QB Replacement Level", value = 14),
-                 numericInput("rbrepl", label = "RB Replacement Level", value = 38),
-                 numericInput("wrrepl", label = "WR Replacement Level", value = 38),
-                 numericInput("terepl", label = "TE Replacement Level", value = 12),
-                 h1("Set Point Values"),
-                 numericInput("PtsPassYd", label = "Pts per passing yard", 1/20),
-                 numericInput("PtsPassTD", label = "Pts per passing TD", 4),
-                 numericInput("PtsINT", label = "Pts per Interception", -2),
-                 numericInput("PtsRYds", label = "Pts per rushing yard", 1/10),
-                 numericInput("PtsRTds", label = "Pts per rushing TD", 6),
-                 numericInput("PtsFL", label = "Pts per fumble lost", -2),
-                 numericInput("PtsRec", label = "Points per Reception", 1),
-                 numericInput("PtsRecYds", label = "Points per receiving yard", 1/10),
-                 numericInput("PtsRecTDs", label = "Points per receiving TD", 6),
-                 actionButton("download", "Generate Board"),
-                 h1("Instructions"),
-                 p("Input team names, separated by commas, in the order in which they are drafting and click the 'Generate Board' button."),
-                 p("You can change the replacement levels used to generate ranking above as well."),
-                 p("Once you generate the board, you can see available players on the other tabs."),
-                 h1("Continue Old Draft"),
-                 fileInput("oldData", label = "Upload csv file")
+                 fluidRow(
+                   column(4, 
+                          h1("Input Team Names"),
+                          textInput("TeamNames", label = "Team Names", "Team1, Team2, Team3, Team4, Team5"),
+                          textOutput('nTeams'),
+                          h1("Set Replacement Levels"),
+                          numericInput("qbrepl", label = "QB Replacement Level", value = 14),
+                          numericInput("rbrepl", label = "RB Replacement Level", value = 38),
+                          numericInput("wrrepl", label = "WR Replacement Level", value = 38),
+                          numericInput("terepl", label = "TE Replacement Level", value = 12),
+                          h1("Continue Old Draft"),
+                          fileInput("oldData", label = "Upload csv file")
+                          
+                    ),
+                  column(4, 
+                         h1("Set Point Values"),
+                         numericInput("PtsPassYd", label = "Pts per passing yard", 1/20),
+                         numericInput("PtsPassTD", label = "Pts per passing TD", 4),
+                         numericInput("PtsINT", label = "Pts per Interception", -2),
+                         numericInput("PtsRYDS", label = "Pts per rushing yard", 1/10),
+                         numericInput("PtsRTDs", label = "Pts per rushing TD", 6),
+                         numericInput("PtsFL", label = "Pts per fumble lost", -2),
+                         numericInput("PtsRec", label = "Points per Reception", 1),
+                         numericInput("PtsRecYds", label = "Points per receiving yard", 1/10),
+                         numericInput("PtsRecTDS", label = "Points per receiving TD", 6)
+                    ),
+                  column(4,
+                         h1("Instructions"),
+                         p("Input team names, separated by commas, in the order in which they are drafting and click the 'Generate Board' button."),
+                         p("You can change the replacement levels and scoring rules used to generate ranking to the left as well."),
+                         p("Once you generate the board, you can see available players on the other tabs."),
+                         actionButton("download", "Generate Board")
+                    )
+                 ),
                  ),
         tabPanel("Available",
                  DT::dataTableOutput('players')
@@ -110,7 +117,10 @@ server <- function(input, output, session){
   
   
   observeEvent(input$download, {
-    dat <- downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl)
+    dat <- downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
+                 PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
+                 RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)
+    
     
     if(!is.null(input$oldData)){
       oldData <- read.csv(input$oldData$datapath)
@@ -325,6 +335,8 @@ server <- function(input, output, session){
       write.csv(out, con)
     }
   )
+  
+  session$onSessionEnded(stopApp)
   
 }
 
