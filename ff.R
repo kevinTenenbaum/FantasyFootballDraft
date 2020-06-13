@@ -3,8 +3,10 @@ require(XML)
 require(stringr)
 require(rvest)
 require(dplyr)
+require(purrr)
 
-# downloadData()$players %>% head(20)
+
+# dat <- downloadData()
 
 # input <- list(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
 #               PtsPassYd = 1/20, PtsPassTD = 4, PtsINT = -2, PtsRYDS = .1, PtsRTDs = 6,
@@ -13,7 +15,7 @@ require(dplyr)
 # attach(list(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
 #             PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
 #             RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS))
-# 
+
 # downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
 #              PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
 #              RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)$players %>% select(-PlayerLink) %>% arrange(desc(VORP)) #%>% filter(Pos == 'RB')
@@ -90,7 +92,7 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   wr_fp[,'YDS'] <- gsub(",", "", wr_fp[,'YDS'], fixed = TRUE) 
   wr_fp[,'RYDS']<- gsub(",", "", wr_fp[,'RYDS'], fixed = TRUE) 
   
-  
+  paste(c(RecYds,RecTDs,RYDS,RTDS,FL,REC))
   for(i in 1:nrow(wr_fp)){
     wr_fp[i,'FPTS'] <- sum(c(RecYds,RecTDs,RYDS,RTDS,FL,REC)*as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')]))
   }
@@ -166,40 +168,51 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   
   fp_all <- rbind(qb_fp[,c('Player','FPTS','Pos','VORP','cluster')], rb_fp[,c('Player','FPTS','Pos','VORP','cluster')],wr_fp[,c('Player','FPTS','Pos','VORP','cluster')], te_fp[,c('Player','FPTS','Pos','VORP','cluster')])
   
-  names <- strsplit(fp_all$Player,' ')
+  names <- strsplit(str_replace(fp_all$Player, "'", ""),' ')
   
   fp_all.names <- c()
-  for (i in 1:length(names)){
-    name_first <- names[[i]][1]
-    name_last <- names[[i]][2]
-    name <- paste(name_first,name_last)
-    fp_all.names <- c(fp_all.names, name)
-  }
+  name_first <- map(names, 1)
+  name_last <- map(names, 2)
+  suffix <- map(names, 3)
+  name_last <- ifelse(suffix %in% c('Jr.','II','III','IV'), paste(name_last, suffix), name_last)
+  fp_all.names <- paste(name_first, name_last)
   
   fp_all$name <- fp_all.names
   
-  names <- strsplit(experts[,'Overall (Team)'], ' ')
+  new <- experts %>% mutate(Player = str_replace(`Overall (Team)`, "'", ''),
+                            Pos = substring(Pos, 1, 2))  %>% filter(str_detect(Player, '\\.'))
   
-  experts.names <- c()
-  teambyes <- c()
-  for (i in 1:length(names)){
-    name_first <- names[[i]][1]
-    name_last <- names[[i]][3]
-    name <- paste(name_first, name_last)
-    experts.names <- c(experts.names,name)
-    team.bye <- names[[i]][3]
-    teambyes <- c(teambyes, team.bye)
+  
+  new$PlayerName <- NA
+  for(i in 1:nrow(new)){
+    
+    
+    if(str_detect(new[i,'Player'], 'Jr.')){
+      endNum <- 2
+    } else{
+      endNum <- 1
+    }
+    
+    if(substring(new[i,'Player'], 2, 2) == '.'){
+      endNum <- endNum + 2
+    }
+    
+    end <- str_locate_all(new[i,'Player'], '\\.')[[1]]
+    end <- end[endNum,'start']
+    
+    spString <- str_split(new$Player[i], ' ')[[1]]
+    tm <- spString[[length(spString)]]
+    
+    new$PlayerName[i] <- tolower(str_sub(new[i,'Player'], 1, end-2))
   }
   
-  experts$name <- experts.names
-  colnames(experts)[2] <- 'Player'
+  all <- fp_all %>% mutate(name = tolower(name)) %>% arrange(desc(VORP)) %>% left_join(new %>% select(PlayerName, Bye, Best, Worst, Avg,`Std Dev`, ADP), by = c('name' = 'PlayerName'))
   
-  experts$team.bye <- teambyes
   
-  experts <- experts[,c('Avg', 'Std Dev','Best','Worst','team.bye','name')]
   
-  all <- fp_all %>% left_join(experts, by = 'name')
-  all <- all[order(all$VORP, decreasing=T),c('Player','team.bye','Pos','FPTS','VORP', 'Avg','Std Dev', 'Best','Worst','cluster')]
+  
+  
+  all <- all[order(all$VORP, decreasing=T),c('Player','Bye','Pos','FPTS','VORP', 'Avg','Std Dev', 'Best','Worst','cluster')]
   rownames(all) <- 1:nrow(all)
   all[,c('FPTS','VORP')] <- round(all[,c('FPTS','VORP')])
   qbs <- all[which(all[,'Pos']=='QB'),]
@@ -266,6 +279,12 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   all$queue <- FALSE
   DST$queue <- FALSE
   k$queue <- FALSE
+  
+  all$Best <- as.numeric(all$Best)
+  all$Worst <- as.numeric(all$Worst)
+  all$Avg <- as.numeric(all$Avg)
+  all$`Std Dev` <- as.numeric(all$`Std Dev`)
+  # all$Avg <- ifelse(is.na(all$Avg), Inf, all$Avg)
   
   all$Rnk <- 1:nrow(all)
   

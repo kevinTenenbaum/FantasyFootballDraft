@@ -23,7 +23,7 @@ ui <- fluidPage(
   sidebarLayout(
       conditionalPanel(
         condition = "input.displayType !== 'LeagueSetup'",
-        sidebarPanel(
+        sidebarPanel(style = "position:fixed;width:inherit;",
           actionButton("selectPlayer", "Draft Player"),
           selectInput("MyTeam", choices = NA, label = "Your Team"),
           selectInput("CurrentTeam", choices = NA, label = "Current"),
@@ -56,6 +56,9 @@ ui <- fluidPage(
                     ),
                   column(4, 
                          h1("Set Point Values"),
+                         
+                         
+                         
                          numericInput("PtsPassYd", label = "Pts per passing yard", 1/20),
                          numericInput("PtsPassTD", label = "Pts per passing TD", 4),
                          numericInput("PtsINT", label = "Pts per Interception", -2),
@@ -118,8 +121,9 @@ server <- function(input, output, session){
   
   observeEvent(input$download, {
     dat <- downloadData(qbrepl = input$qbrepl, rbrepl = input$rbrepl, wrrepl = input$wrrepl, terepl = input$terepl,
-                 PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
-                 RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsREC, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)
+                        PassYds = input$PtsPassYd, PassTD = input$PtsPassTD, INT = input$PtsINT, RYDS = input$PtsRYDS,
+                        RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsRec, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)
+    
     
     
     if(!is.null(input$oldData)){
@@ -233,21 +237,20 @@ server <- function(input, output, session){
   output$players <- DT::renderDataTable({
     if(nrow(v$players) > 0){
       
-      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Position = Pos, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
+      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Bye, Position = Pos, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
                 selection = 'single',
                 # filter = 'top',
                 rownames = FALSE,
-                extensions = c('KeyTable', 'Responsive','ColReorder','FixedHeader'),
+                extensions = c('Responsive','ColReorder','FixedHeader'),
                 style = 'default',
                 filter = 'top',
                 escape = 1,
-                options = list(pageLength = 100,
+                options = list(pageLength = 200,
                                colReorder = TRUE,
-                               keys = TRUE,
                                colReorder = TRUE,
                                fixedHeader = TRUE
-                               , columnDefs = list(list(visible = FALSE, targets = 9),
-                                                   list(searchable = FALSE, targets = c(0,3 ,4, 5, 6, 7, 8)))
+                               , columnDefs = list(list(visible = FALSE, targets = 10),
+                                                   list(searchable = FALSE, targets = c(0, 4, 5, 6, 7, 8, 9)))
                                )   
       ) %>% formatStyle('Player', 'Cluster', backgroundColor = styleEqual(1:10, brewer.pal(n = 10, name = 'Set3')))
       
@@ -291,7 +294,16 @@ server <- function(input, output, session){
         datatable(out,
                   selection = 'single')
       } else{
-        datatable(out,selection = 'single')  
+        datatable(out,selection = 'single',
+                  rownames = FALSE,
+                  extensions = c('FixedColumns','Scroller'),
+                  options = list(
+                    deferRender = TRUE,
+                    scrollY = 200,
+                    scroller =TRUE,
+                    scrollX = TRUE,
+                    fixedColumns = FALSE
+                  ))  
       }
       
     }
@@ -300,7 +312,7 @@ server <- function(input, output, session){
   
   output$defense <- DT::renderDataTable({
     if(nrow(v$defense) > 0){
-      datatable(v$defense[!v$draftedDef,] %>% select(DST, Player, ESPN, Yahoo, MFL, FFC, AVG), 
+      datatable(v$defense %>% filter(is.na(team)) %>% select(DST, Player, ESPN, Yahoo, MFL, FFC, AVG), 
                 selection = 'single')   
     } else{
       datatable(data.frame(Fail  = 1))
@@ -310,7 +322,7 @@ server <- function(input, output, session){
   
   output$kickers <- DT::renderDataTable({
     if(nrow(v$kickers) > 0){
-      datatable(v$kickers[!v$draftedK,] %>% select(K, Player, ESPN, Yahoo, MFL, FFC, AVG), 
+      datatable(v$kickers %>% filter(is.na(team)) %>% select(K, Player, ESPN, Yahoo, MFL, FFC, AVG), 
                 selection = 'single')   
     } else{
       datatable(data.frame(Fail  = 1))
@@ -336,7 +348,9 @@ server <- function(input, output, session){
     }
   )
   
-  session$onSessionEnded(stopApp)
+  session$onSessionEnded(function() {
+    stopApp()
+  })
   
 }
 
