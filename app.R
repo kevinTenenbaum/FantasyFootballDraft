@@ -237,7 +237,7 @@ server <- function(input, output, session){
   output$players <- DT::renderDataTable({
     if(nrow(v$players) > 0){
       
-      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Bye, Position = Pos, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
+      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Position = Pos, Bye, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
                 selection = 'single',
                 # filter = 'top',
                 rownames = FALSE,
@@ -252,7 +252,8 @@ server <- function(input, output, session){
                                , columnDefs = list(list(visible = FALSE, targets = 10),
                                                    list(searchable = FALSE, targets = c(0, 4, 5, 6, 7, 8, 9)))
                                )   
-      ) %>% formatStyle('Player', 'Cluster', backgroundColor = styleEqual(1:10, brewer.pal(n = 10, name = 'Set3')))
+      ) %>% formatStyle('Player', 'Cluster', backgroundColor = styleEqual(1:10, brewer.pal(n = 10, name = 'Set3'))) %>%
+        formatStyle("Position", backgroundColor = styleEqual(c('QB','RB','WR','TE'), brewer.pal(n = 4, name  = 'Set2')))
       
       
       

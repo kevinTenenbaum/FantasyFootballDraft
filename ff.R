@@ -123,7 +123,14 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   DST$name <- DST.names
   
   
-  experts <- scrapeExperts("http://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php")
+  if(REC == 1){
+    experts <- scrapeExperts("http://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php")  
+  } else if (REC == .5){
+    experts <- scrapeExperts("https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php")
+  } else{
+    experts <- scrapeExperts("https://www.fantasypros.com/nfl/rankings/half-point-ppr-cheatsheets.php")
+  }
+  
   names(experts)[1] <- 'Rank'
   qb_fp <- cbind(qb_fp,'QB')
   rb_fp <- cbind(rb_fp,'RB')
