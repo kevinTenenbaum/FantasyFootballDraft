@@ -284,9 +284,9 @@ server <- function(input, output, session){
         
       } else{
         
-        pl <- v$players %>% filter(team == input$ViewTeam) %>% select(Player, Pos, VORP, Rnd, Pck) %>% arrange(desc(VORP))
-        d  <- v$defense %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, Pos, VORP, Rnd, Pck)
-        k <- v$kickers %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, Pos, VORP, Rnd, Pck) 
+        pl <- v$players %>% filter(team == input$ViewTeam) %>% select(Player, Pos, VORP, Bye, Rnd) %>% arrange(desc(VORP))
+        d  <- v$defense %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'Def', VORP = 0, Bye = NA) %>% select(Player, Pos, VORP, Rnd)
+        k <- v$kickers %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'K', VORP = 0, Bye = NA) %>% select(Player, Pos, VORP, Rnd) 
         
         out <- bind_rows(pl, d, k)  
       }

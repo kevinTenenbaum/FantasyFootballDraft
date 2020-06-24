@@ -68,14 +68,13 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   names <- strsplit(k[,'Player Team (Bye)'],' ')
   colnames(qb_fp) <- c('Player','PATT','CMP','YDS','TDS','INTS','ATT','RYDS','RTDS','FL','FPTS')
   colnames(te_fp) <- c('Player','REC','YDS','TDS','FL','FPTS')
-  colnames(wr_fp) <- c('Player','ATT','RYDS','RTDS','REC','YDS','TDS','FL','FPTS')
+  colnames(wr_fp) <- c('Player','REC','YDS','TDS','ATT','RYDS','RTDS','FL','FPTS')
   colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
   qb_fp[,'YDS'] <- gsub(",", "", qb_fp[,'YDS'], fixed = TRUE)
   qb_fp[,'RYDS'] <- gsub(",", "", qb_fp[,'RYDS'], fixed = TRUE) 
   
   
   for(i in 1:nrow(qb_fp)){
-    
     qb_fp[i,'FPTS'] <- sum(c(PassYds,PassTD,INT,RYDS,RTDS,FL)*as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')]))
   }
   
