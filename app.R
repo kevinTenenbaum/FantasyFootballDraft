@@ -125,7 +125,6 @@ server <- function(input, output, session){
                         RTDS = input$PtsRTDs, FL = input$PtsFL, REC = input$PtsRec, RecYds= input$PtsRecYds, RecTDs = input$PtsRecTDS)
     
     
-    
     if(!is.null(input$oldData)){
       oldData <- read.csv(input$oldData$datapath)
       dat$players <- dat$players %>% select(-team, -Rnd, -Pck) %>% inner_join(oldData %>% select(Player, Pos, team = Team, Rnd, Pck), by = c('Player','Pos'))
@@ -182,7 +181,6 @@ server <- function(input, output, session){
         v$players[v$players$Player == player & v$players$Pos == pos, 'queue'] <- FALSE
       }
     
-    
   })
   
   observeEvent(input$selectPlayer, {
@@ -204,7 +202,6 @@ server <- function(input, output, session){
     updateVarSelectInput(session, "CurrentTeam", selected = nxt)
     v$Rnd <- as.numeric(nxtPickRnd['Rnd'])
     v$Pck <- as.numeric(nxtPickRnd['Pck'])
-    
     
     
   })

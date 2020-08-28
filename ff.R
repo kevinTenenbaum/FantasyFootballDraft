@@ -272,16 +272,16 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   all$Player <- str_replace(all$Player, "'", '')
   all$Pos <- as.character(all$Pos)
   
-  all$team <- NA
-  DST$team <- NA
-  k$team <- NA
+  all$team <- NA_character_
+  DST$team <- NA_character_
+  k$team <- NA_character_
   
-  all$Rnd <- NA
-  all$Pck <- NA
-  DST$Rnd <- NA
-  DST$Pck <- NA
-  k$Rnd <- NA
-  k$Pck <- NA
+  all$Rnd <- NA_character_
+  all$Pck <- NA_character_
+  DST$Rnd <- NA_character_
+  DST$Pck <- NA_character_
+  k$Rnd <- NA_character_
+  k$Pck <- NA_character_
   all$queue <- FALSE
   DST$queue <- FALSE
   k$queue <- FALSE
