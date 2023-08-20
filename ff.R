@@ -33,7 +33,8 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
       html_nodes("table") %>%
       html_table()
     tab <- tables[which.max(sapply(tables, nrow))][[1]]
-    rowOne <- max(which(sapply(tab[,1], function(x) length(strsplit(x, ' ')[[1]])) == 1)) + 1
+    rowOne <- which(tab[,1] == "Player") + 1
+    # rowOne <- max(which(sapply(tab[,1], function(x) length(strsplit(x, ' ')[[1]])) == 1)) + 1
     return(tab[rowOne:nrow(tab),])
   }
   
@@ -47,14 +48,8 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
     return(tab)
   }
   
-  scrapeExperts <- function(url){
-    site <- read_html(url)
-    tables <- site %>%
-      html_nodes("table") %>%
-      html_table(fill = TRUE)
-    tab <- tables[which.max(sapply(tables, nrow))][[1]][,1:10]
-    Tiers <- which(substring(tab[,1], 1, 4) == 'Tier')
-    tab <- tab[-Tiers,]
+  scrapeExperts <- function(){
+    tab <- read.csv("FantasyPros_2023_Draft_ALL_Rankings.csv")
     return(tab)
   }
   cat("Pulling projections... \n")
@@ -65,41 +60,36 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   k <- scrapeADP("http://www.fantasypros.com/nfl/adp/k.php")
   DST <- scrapeADP("http://www.fantasypros.com/nfl/adp/dst.php")
   
-  names <- strsplit(k[,'Player Team (Bye)'],' ')
+  names <- strsplit(unlist(k[,'Player Team (Bye)']),' ')
   colnames(qb_fp) <- c('Player','PATT','CMP','YDS','TDS','INTS','ATT','RYDS','RTDS','FL','FPTS')
   colnames(te_fp) <- c('Player','REC','YDS','TDS','FL','FPTS')
   colnames(wr_fp) <- c('Player','REC','YDS','TDS','ATT','RYDS','RTDS','FL','FPTS')
   colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
-  qb_fp[,'YDS'] <- gsub(",", "", qb_fp[,'YDS'], fixed = TRUE)
-  qb_fp[,'RYDS'] <- gsub(",", "", qb_fp[,'RYDS'], fixed = TRUE) 
+  qb_fp[,'YDS'] <- gsub(",", "", unlist(qb_fp[,'YDS']), fixed = TRUE)
+  qb_fp[,'RYDS'] <- gsub(",", "", unlist(qb_fp[,'RYDS']), fixed = TRUE) 
   
   
-  for(i in 1:nrow(qb_fp)){
-    qb_fp[i,'FPTS'] <- sum(c(PassYds,PassTD,INT,RYDS,RTDS,FL)*as.numeric(qb_fp[i,c('YDS','TDS','INTS','RYDS','RTDS','FL')]))
-  }
+  qb_fp[,c('YDS','TDS','INTS','RYDS','RTDS','FL')] <- sapply(c('YDS','TDS','INTS','RYDS','RTDS','FL'), function(x) as.numeric(unlist(qb_fp[,x])))
+  qb_fp$FPTS <- as.matrix((qb_fp[,c('YDS','TDS','INTS','RYDS','RTDS','FL')])) %*% c(PassYds,PassTD,INT,RYDS,RTDS,FL)
+  
+  rb_fp[,'YDS'] <- gsub(",", "", unlist(rb_fp[,'YDS']), fixed = TRUE) 
+  rb_fp[,'RYDS']<- gsub(",", "", unlist(rb_fp[,'RYDS']), fixed = TRUE) 
+  
+  rb_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')] <- sapply(c('YDS','TDS','RYDS','RTDS','FL','REC'), function(x) as.numeric(unlist(rb_fp[,x])))
+  rb_fp$FPTS <- as.matrix((rb_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')])) %*% c(RYDS,RTDS,RecYds,RecTDs,FL, REC)
   
   
-  colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
-  rb_fp[,'YDS'] <- gsub(",", "", rb_fp[,'YDS'], fixed = TRUE) 
-  rb_fp[,'RYDS']<- gsub(",", "", rb_fp[,'RYDS'], fixed = TRUE) 
+  wr_fp[,'YDS'] <- gsub(",", "", unlist(wr_fp[,'YDS']), fixed = TRUE) 
+  wr_fp[,'RYDS']<- gsub(",", "", unlist(wr_fp[,'RYDS']), fixed = TRUE) 
   
-  for(i in 1:nrow(rb_fp)){
-    rb_fp[i,'FPTS'] <- sum(c(RYDS,RTDS,RecYds,RecTDs,FL, REC)*as.numeric(rb_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')]))
-  }
+  wr_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')] <- sapply(c('YDS','TDS','RYDS','RTDS','FL','REC'), function(x) as.numeric(unlist(wr_fp[,x])))
+  wr_fp$FPTS <- as.matrix((wr_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')])) %*% c(RecYds,RecTDs,RYDS,RTDS,FL,REC)
   
-  # colnames(wr_fp) <- colnames(rb_fp)
-  wr_fp[,'YDS'] <- gsub(",", "", wr_fp[,'YDS'], fixed = TRUE) 
-  wr_fp[,'RYDS']<- gsub(",", "", wr_fp[,'RYDS'], fixed = TRUE) 
   
-  paste(c(RecYds,RecTDs,RYDS,RTDS,FL,REC))
-  for(i in 1:nrow(wr_fp)){
-    wr_fp[i,'FPTS'] <- sum(c(RecYds,RecTDs,RYDS,RTDS,FL,REC)*as.numeric(wr_fp[i,c('YDS','TDS','RYDS','RTDS','FL','REC')]))
-  }
+  te_fp[,'YDS'] <- gsub(",", "", unlist(te_fp[,'YDS']), fixed = TRUE) 
+  te_fp[,c('YDS','TDS','FL','REC')] <- sapply(c('YDS','TDS','FL','REC'), function(x) as.numeric(unlist(te_fp[,x])))
+  te_fp$FPTS <- as.matrix((te_fp[,c('YDS','TDS','FL','REC')])) %*% c(RecYds,RecTDs,FL,REC)
   
-  te_fp[,'YDS'] <- gsub(",", "", te_fp[,'YDS'], fixed = TRUE) 
-  for(i in 1:nrow(te_fp)){
-    te_fp[i,'FPTS'] <- sum(c(RecYds,RecTDs,FL,REC)*as.numeric(te_fp[i,c('YDS','TDS','FL','REC')]))
-  }
   
   k.names <- c()
   for (i in 1:length(names)){
@@ -109,7 +99,7 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
     k.names <- c(k.names, name)
   }
   k$name <- k.names
-  names <- strsplit(DST[,'Player Team (Bye)'],' ')
+  names <- strsplit(unlist(DST[,'Player Team (Bye)']),' ')
   
   DST.names <- c()
   for (i in 1:length(names)){
@@ -123,7 +113,7 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   
   
   if(REC == 1){
-    experts <- scrapeExperts("http://www.fantasypros.com/nfl/rankings/consensus-cheatsheets.php")  
+    experts <- scrapeExperts()  
   } else if (REC == .5){
     experts <- scrapeExperts("https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php")
   } else{
@@ -153,13 +143,13 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   rb_fp <- rb_fp[order(rb_fp$FPTS, decreasing = TRUE),]
   wr_fp <- wr_fp[order(wr_fp$FPTS, decreasing = TRUE),]
   te_fp <- te_fp[order(te_fp$FPTS, decreasing = TRUE),]
-  
+  tewr_fp <- bind_rows(wr_fp, te_fp) %>% arrange(desc(FPTS))
   
   ## Calculate Replacement Levels
   qbr <- mean(qb_fp[qbrepl, 'FPTS'], qb_fp[qbrepl+1,'FPTS'], qb_fp[qbrepl-1,'FPTS'])
   rbr <- mean(rb_fp[rbrepl, 'FPTS'], rb_fp[rbrepl+1,'FPTS'], rb_fp[rbrepl-1,'FPTS'])
-  wrr <- mean(wr_fp[wrrepl, 'FPTS'], wr_fp[wrrepl+1,'FPTS'], wr_fp[wrrepl-1,'FPTS'])
-  ter <- mean(te_fp[terepl, 'FPTS'], te_fp[terepl+1,'FPTS'], te_fp[terepl-1,'FPTS'])
+  wrr <- mean(tewr_fp[wrrepl, 'FPTS'], tewr_fp[wrrepl+1,'FPTS'], tewr_fp[wrrepl-1,'FPTS'])
+  ter <- mean(tewr_fp[terepl, 'FPTS'], tewr_fp[terepl+1,'FPTS'], tewr_fp[terepl-1,'FPTS'])
   
   qb_fp$VORP <- qb_fp$FPTS - qbr
   rb_fp$VORP <- rb_fp$FPTS - rbr
@@ -185,40 +175,40 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   
   fp_all$name <- fp_all.names
   
-  new <- experts %>% mutate(Player = str_replace(`Overall (Team)`, "'", ''),
-                            Pos = substring(Pos, 1, 2))  %>% filter(str_detect(Player, '\\.'))
+  new <- experts %>% mutate(Player = paste(PLAYER.NAME, TEAM),
+                            Pos = substring(POS, 1, 2))  #%>% filter(str_detect(Player, '\\.'))
   
   
-  new$PlayerName <- NA
-  for(i in 1:nrow(new)){
-    
-    
-    if(str_detect(new[i,'Player'], 'Jr.')){
-      endNum <- 2
-    } else{
-      endNum <- 1
-    }
-    
-    if(substring(new[i,'Player'], 2, 2) == '.'){
-      endNum <- endNum + 2
-    }
-    
-    end <- str_locate_all(new[i,'Player'], '\\.')[[1]]
-    end <- end[endNum,'start']
-    
-    spString <- str_split(new$Player[i], ' ')[[1]]
-    tm <- spString[[length(spString)]]
-    
-    new$PlayerName[i] <- tolower(str_sub(new[i,'Player'], 1, end-2))
-  }
+  # new$PlayerName <- NA
+  # for(i in 1:nrow(new)){
+  #   
+  #   
+  #   if(str_detect(new[i,'Player'], 'Jr.')){
+  #     endNum <- 2
+  #   } else{
+  #     endNum <- 1
+  #   }
+  #   
+  #   if(substring(new[i,'Player'], 2, 2) == '.'){
+  #     endNum <- endNum + 2
+  #   }
+  #   
+  #   end <- str_locate_all(new[i,'Player'], '\\.')[[1]]
+  #   end <- end[endNum,'start']
+  #   
+  #   spString <- str_split(new$Player[i], ' ')[[1]]
+  #   tm <- spString[[length(spString)]]
+  #   
+  #   new$PlayerName[i] <- tolower(str_sub(new[i,'Player'], 1, end-2))
+  # }
   
-  all <- fp_all %>% mutate(name = tolower(name)) %>% arrange(desc(VORP)) %>% left_join(new %>% select(PlayerName, Bye, Best, Worst, Avg,`Std Dev`, ADP), by = c('name' = 'PlayerName'))
-  
-  
+  all <- fp_all %>% mutate(name = tolower(name)) %>% arrange(desc(VORP)) %>% left_join(new %>% mutate(ADP = Rank + as.numeric(ECR.VS..ADP)) %>% select(Player, Best = BEST, Worst = WORST, Avg = AVG.,`Std Dev` = STD.DEV, ADP), by = c('Player' = 'Player'))
   
   
   
-  all <- all[order(all$VORP, decreasing=T),c('Player','Bye','Pos','FPTS','VORP', 'Avg','Std Dev', 'Best','Worst','cluster')]
+  
+  
+  all <- all[order(all$VORP, decreasing=T),c('Player','Pos','FPTS','VORP', 'Avg','Std Dev', 'Best','Worst','cluster','ADP')]
   rownames(all) <- 1:nrow(all)
   all[,c('FPTS','VORP')] <- round(all[,c('FPTS','VORP')])
   qbs <- all[which(all[,'Pos']=='QB'),]
@@ -378,3 +368,4 @@ clusterPlayers <- function(players, n = 10){
 # dbDisconnect(con)
 # 
 # 
+

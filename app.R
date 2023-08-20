@@ -47,9 +47,9 @@ ui <- fluidPage(
                           textOutput('nTeams'),
                           h1("Set Replacement Levels"),
                           numericInput("qbrepl", label = "QB Replacement Level", value = 14),
-                          numericInput("rbrepl", label = "RB Replacement Level", value = 38),
-                          numericInput("wrrepl", label = "WR Replacement Level", value = 38),
-                          numericInput("terepl", label = "TE Replacement Level", value = 12),
+                          numericInput("rbrepl", label = "RB Replacement Level", value = 36),
+                          numericInput("wrrepl", label = "WR Replacement Level", value = 46),
+                          numericInput("terepl", label = "TE Replacement Level", value = 46),
                           h1("Continue Old Draft"),
                           fileInput("oldData", label = "Upload csv file")
                           
@@ -101,7 +101,11 @@ ui <- fluidPage(
 
 
 input <- list(TeamNames = c("Kevin, Caroline, Mary, Alan"),
-              qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 16)
+              currentTeam = "Caroline",
+              qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 16,
+              PtsPassYd = 1/20, PtsPassTD = 4, PtsINT = -2, PtsRYDS = 1/10, PtsRTDs = 6, PtsFL = -2, PtsRec = 1, PtsRecYds= .1, PtsRecTDS = 6)
+
+
 server <- function(input, output, session){
   
   
@@ -193,17 +197,19 @@ server <- function(input, output, session){
   
       
     } else if(input$displayType == "Defense"){
+      v$defense[is.na(v$defense$team),][input$defense_rows_selected,c('team','Rnd','Pck')] <- t(c(input$CurrentTeam, v$Rnd, v$Pck))
       v$draftedDef[input$defense_rows_selected] <- TRUE
-      v$defense[is.na(v$defense$team),][input$defense_rows_selected,c('team','Rnd','Pck')] <- c(input$CurrentTeam, v$Rnd, v$Pck)
+      
     } else if(input$displayType == 'Kickers'){
+      v$kickers[is.na(v$kickers$team),][input$kickers_rows_selected,c('team','Rnd','Pck')] <- t(c(input$CurrentTeam, v$Rnd, v$Pck))
       v$kickers[is.na(v$kickers$team),][input$kickers_rows_selected] <- TRUE
-      v$kickers[is.na(v$kickers$team),][input$kickers_rows_selected,c('team','Rnd','Pck')] <- c(input$CurrentTeam, v$Rnd, v$Pck)
+  
     }
     updateVarSelectInput(session, "CurrentTeam", selected = nxt)
     v$Rnd <- as.numeric(nxtPickRnd['Rnd'])
     v$Pck <- as.numeric(nxtPickRnd['Pck'])
     
-    
+    write.csv(v$players, file = "draft_")
   })
   
   output$Round <- renderText({
@@ -234,7 +240,7 @@ server <- function(input, output, session){
   output$players <- DT::renderDataTable({
     if(nrow(v$players) > 0){
       
-      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Position = Pos, Bye, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
+      datatable(v$players %>% filter(is.na(team)) %>% select(Rnk, Player = PlayerLink, Position = Pos, FPTS, VORP, Avg, SD = `Std Dev`, Best, Worst, Cluster = cluster), 
                 selection = 'single',
                 # filter = 'top',
                 rownames = FALSE,
@@ -246,8 +252,8 @@ server <- function(input, output, session){
                                colReorder = TRUE,
                                colReorder = TRUE,
                                fixedHeader = TRUE
-                               , columnDefs = list(list(visible = FALSE, targets = 10),
-                                                   list(searchable = FALSE, targets = c(0, 4, 5, 6, 7, 8, 9)))
+                               , columnDefs = list(list(visible = FALSE, targets = 9),
+                                                   list(searchable = FALSE, targets = c(0, 3, 4, 5, 6, 7, 8)))
                                )   
       ) %>% formatStyle('Player', 'Cluster', backgroundColor = styleEqual(1:10, brewer.pal(n = 10, name = 'Set3'))) %>%
         formatStyle("Position", backgroundColor = styleEqual(c('QB','RB','WR','TE'), brewer.pal(n = 4, name  = 'Set2')))
@@ -281,9 +287,9 @@ server <- function(input, output, session){
         
       } else{
         
-        pl <- v$players %>% filter(team == input$ViewTeam) %>% select(Player, Pos, VORP, Bye, Rnd) %>% arrange(desc(VORP))
-        d  <- v$defense %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'Def', VORP = 0, Bye = NA) %>% select(Player, Pos, VORP, Rnd)
-        k <- v$kickers %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'K', VORP = 0, Bye = NA) %>% select(Player, Pos, VORP, Rnd) 
+        pl <- v$players %>% filter(team == input$ViewTeam) %>% select(Player, Pos, VORP, Rnd) %>% arrange(desc(VORP))
+        d  <- v$defense %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'Def', VORP = 0) %>% select(Player, Pos, VORP, Rnd)
+        k <- v$kickers %>% filter(team == input$ViewTeam) %>% mutate(Pos = 'K', VORP = 0) %>% select(Player, Pos, VORP, Rnd) 
         
         out <- bind_rows(pl, d, k)  
       }
@@ -310,7 +316,7 @@ server <- function(input, output, session){
   
   output$defense <- DT::renderDataTable({
     if(nrow(v$defense) > 0){
-      datatable(v$defense %>% filter(is.na(team)) %>% select(DST, Player, ESPN, Yahoo, MFL, FFC, AVG), 
+      datatable(v$defense %>% filter(is.na(team)) %>% select(DST, Player, ESPN, Yahoo, CBS, RTSports, AVG), 
                 selection = 'single')   
     } else{
       datatable(data.frame(Fail  = 1))
@@ -320,7 +326,7 @@ server <- function(input, output, session){
   
   output$kickers <- DT::renderDataTable({
     if(nrow(v$kickers) > 0){
-      datatable(v$kickers %>% filter(is.na(team)) %>% select(K, Player, ESPN, Yahoo, MFL, FFC, AVG), 
+      datatable(v$kickers %>% filter(is.na(team)) %>% select(K, Player, ESPN, Yahoo, CBS, RTSports, AVG), 
                 selection = 'single')   
     } else{
       datatable(data.frame(Fail  = 1))
