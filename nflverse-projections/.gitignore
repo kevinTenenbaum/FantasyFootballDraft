@@ -1,0 +1,7 @@
+data/raw/
+data/derived/
+data/manifests/
+data/models/
+*.Rproj.user/
+.Rhistory
+.RData

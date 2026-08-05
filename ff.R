@@ -1,9 +1,345 @@
 options(stringsAsFactors = FALSE)
-require(XML)
 require(stringr)
 require(rvest)
 require(dplyr)
 require(purrr)
+
+
+extractEmbeddedJson <- function(html, variablePattern){
+  pattern <- paste0(
+    "(?s)(?:var\\s+)?",
+    variablePattern,
+    "\\s*=\\s*(\\{.*?\\});"
+  )
+  match <- regexec(pattern, html, perl = TRUE)
+  value <- regmatches(html, match)[[1]]
+
+  if(length(value) < 2){
+    stop(
+      paste("FantasyPros changed the page format; could not find", variablePattern),
+      call. = FALSE
+    )
+  }
+
+  jsonlite::fromJSON(value[[2]], simplifyVector = FALSE)
+}
+
+
+readFantasyProsPage <- function(url){
+  if(!requireNamespace("jsonlite", quietly = TRUE)){
+    stop("The jsonlite package is required to read FantasyPros data.", call. = FALSE)
+  }
+
+  tryCatch(
+    as.character(rvest::read_html(url)),
+    error = function(error){
+      stop(
+        sprintf("Could not download FantasyPros page %s: %s", url, error$message),
+        call. = FALSE
+      )
+    }
+  )
+}
+
+
+fetchFantasyProsADP <- function(position, rankings = NULL){
+  position <- tolower(position)
+  if(!position %in% c("k", "dst")){
+    stop("FantasyPros ADP position must be either 'k' or 'dst'.", call. = FALSE)
+  }
+
+  url <- sprintf("https://www.fantasypros.com/nfl/adp/%s.php", position)
+  config <- extractEmbeddedJson(
+    readFantasyProsPage(url),
+    "window\\.FP\\.reportConfig"
+  )
+
+  fields <- config$table$fields
+  rows <- config$table$rows
+  if(is.null(fields) || is.null(rows) || length(rows) == 0){
+    stop(
+      sprintf("FantasyPros returned no %s ADP rows.", toupper(position)),
+      call. = FALSE
+    )
+  }
+
+  fieldKeys <- setNames(
+    vapply(fields, function(field) field$key, character(1)),
+    vapply(fields, function(field) field$label, character(1))
+  )
+
+  valueFor <- function(row, label, numeric = TRUE){
+    key <- unname(fieldKeys[[label]])
+    value <- if(is.null(key) || is.null(row[[key]])) NA else row[[key]]
+    if(numeric) suppressWarnings(as.numeric(value)) else as.character(value)
+  }
+
+  parsedRows <- lapply(rows, function(row){
+    player <- row$player
+    data.frame(
+      Rank = valueFor(row, toupper(position)),
+      Overall = valueFor(row, "Overall"),
+      FantasyProsID = as.character(row$id),
+      Player = if(is.null(player$name)) NA_character_ else player$name,
+      ESPN = valueFor(row, "ESPN"),
+      Yahoo = valueFor(row, "Yahoo"),
+      CBS = valueFor(row, "CBS"),
+      Fantrax = valueFor(row, "Fantrax"),
+      Sleeper = valueFor(row, "Sleeper"),
+      RTSports = valueFor(row, "RTSports"),
+      AVG = valueFor(row, "AVG"),
+      `Real-Time` = valueFor(row, "Real-Time"),
+      check.names = FALSE
+    )
+  })
+
+  out <- bind_rows(parsedRows)
+  names(out)[1] <- toupper(position)
+
+  if(is.null(rankings)) return(out)
+
+  requiredColumns <- c(
+    "FantasyProsID", "PlayerName", "Pos", "ECR", "PositionRank"
+  )
+  if(!all(requiredColumns %in% names(rankings))){
+    stop("Rankings data is missing fields needed to complete K/DST ADP.", call. = FALSE)
+  }
+
+  positionRankings <- rankings %>%
+    filter(Pos == toupper(position)) %>%
+    transmute(
+      FantasyProsID,
+      PositionRank,
+      ECR,
+      Player = PlayerName
+    )
+
+  if(nrow(positionRankings) == 0){
+    stop(
+      sprintf("FantasyPros rankings returned no %s players.", toupper(position)),
+      call. = FALSE
+    )
+  }
+
+  rankColumn <- toupper(position)
+  preview <- out
+  names(preview)[names(preview) == rankColumn] <- "ADPRank"
+  names(preview)[names(preview) == "Overall"] <- "ADPOverall"
+
+  completed <- positionRankings %>%
+    left_join(preview %>% select(-Player), by = "FantasyProsID") %>%
+    transmute(
+      Rank = dplyr::coalesce(ADPRank, PositionRank),
+      Overall = dplyr::coalesce(ADPOverall, ECR),
+      FantasyProsID,
+      Player,
+      ESPN,
+      Yahoo,
+      CBS,
+      Fantrax,
+      Sleeper,
+      RTSports,
+      AVG,
+      `Real-Time`
+    ) %>%
+    arrange(Rank)
+
+  names(completed)[1] <- rankColumn
+  completed
+}
+
+
+fetchFantasyProsRankings <- function(receptionPoints = 1){
+  page <- if(isTRUE(all.equal(receptionPoints, 1))){
+    "ppr-cheatsheets.php"
+  } else if(isTRUE(all.equal(receptionPoints, 0.5))){
+    "half-point-ppr-cheatsheets.php"
+  } else {
+    "consensus-cheatsheets.php"
+  }
+
+  url <- paste0("https://www.fantasypros.com/nfl/rankings/", page)
+  rankings <- extractEmbeddedJson(readFantasyProsPage(url), "ecrData")
+
+  if(is.null(rankings$players) || length(rankings$players) == 0){
+    stop("FantasyPros returned no consensus ranking rows.", call. = FALSE)
+  }
+
+  scalarNumber <- function(value){
+    if(is.null(value) || length(value) == 0) return(NA_real_)
+    suppressWarnings(as.numeric(value[[1]]))
+  }
+
+  bind_rows(lapply(rankings$players, function(player){
+    ecrDelta <- scalarNumber(player$player_ecr_delta)
+    rank <- scalarNumber(player$rank_ecr)
+    positionRank <- if(is.null(player$pos_rank) || length(player$pos_rank) == 0){
+      NA_real_
+    } else {
+      suppressWarnings(as.numeric(stringr::str_extract(player$pos_rank[[1]], "[0-9]+")))
+    }
+
+    data.frame(
+      FantasyProsID = as.character(player$player_id),
+      PlayerName = player$player_name,
+      Team = player$player_team_id,
+      Player = paste(player$player_name, player$player_team_id),
+      Pos = player$player_position_id,
+      ECR = rank,
+      PositionRank = positionRank,
+      Best = scalarNumber(player$rank_min),
+      Worst = scalarNumber(player$rank_max),
+      Avg = scalarNumber(player$rank_ave),
+      `Std Dev` = scalarNumber(player$rank_std),
+      ADP = if(is.na(ecrDelta)) NA_real_ else rank + ecrDelta,
+      check.names = FALSE
+    )
+  }))
+}
+
+
+projectionStats <- function(player){
+  stats <- player$stats
+  if(is.null(stats) || length(stats) == 0){
+    stop(
+      sprintf("FantasyPros returned no projection stats for %s.", player$name),
+      call. = FALSE
+    )
+  }
+
+  if(!is.null(names(stats)) && "points" %in% names(stats)){
+    return(stats)
+  }
+
+  if(is.list(stats[[1]])) return(stats[[1]])
+
+  stop(
+    sprintf("FantasyPros returned an unexpected projection format for %s.", player$name),
+    call. = FALSE
+  )
+}
+
+
+parseFantasyProsProjections <- function(payload, position){
+  players <- payload$players
+  if(is.null(players) || length(players) == 0){
+    stop(
+      sprintf("FantasyPros returned no %s projections.", position),
+      call. = FALSE
+    )
+  }
+
+  reportedCount <- suppressWarnings(as.integer(payload$count))
+  if(
+    length(reportedCount) == 1 &&
+      !is.na(reportedCount) &&
+      reportedCount > length(players)
+  ){
+    stop(
+      paste0(
+        "FantasyPros reports ", reportedCount, " ", position,
+        " projections but returned only ", length(players),
+        ". This API key appears limited to free-tier sample data; ",
+        "the draft board requires a Premium/HOF or other full-data key."
+      ),
+      call. = FALSE
+    )
+  }
+
+  statValue <- function(stats, name){
+    value <- stats[[name]]
+    if(is.null(value) || length(value) == 0) return(NA_real_)
+    suppressWarnings(as.numeric(value[[1]]))
+  }
+
+  out <- bind_rows(lapply(players, function(player){
+    stats <- projectionStats(player)
+    data.frame(
+      FantasyProsID = as.character(player$fpid),
+      PlayerName = as.character(player$name),
+      Team = as.character(player$team_id),
+      PlayerFile = as.character(player$filename),
+      pass_att = statValue(stats, "pass_att"),
+      pass_cmp = statValue(stats, "pass_cmp"),
+      pass_yds = statValue(stats, "pass_yds"),
+      pass_tds = statValue(stats, "pass_tds"),
+      pass_ints = statValue(stats, "pass_ints"),
+      rush_att = statValue(stats, "rush_att"),
+      rush_yds = statValue(stats, "rush_yds"),
+      rush_tds = statValue(stats, "rush_tds"),
+      receptions = statValue(stats, "rec_rec"),
+      rec_yds = statValue(stats, "rec_yds"),
+      rec_tds = statValue(stats, "rec_tds"),
+      fumbles = statValue(stats, "fumbles"),
+      check.names = FALSE
+    )
+  }))
+
+  requiredStat <- if(position == "QB") "pass_yds" else "rec_yds"
+  if(all(is.na(out[[requiredStat]]))){
+    stop(
+      sprintf("FantasyPros %s projections are missing %s.", position, requiredStat),
+      call. = FALSE
+    )
+  }
+
+  out
+}
+
+
+fetchFantasyProsProjections <- function(position,
+                                        season = as.integer(format(Sys.Date(), "%Y")),
+                                        apiKey = Sys.getenv("FANTASYPROS_API_KEY")){
+  position <- toupper(position)
+  if(!position %in% c("QB", "RB", "WR", "TE")){
+    stop("FantasyPros projection position must be QB, RB, WR, or TE.", call. = FALSE)
+  }
+
+  if(!nzchar(apiKey)){
+    stop(
+      paste(
+        "FantasyPros now limits its public projection tables to a small preview.",
+        "Set FANTASYPROS_API_KEY to use the official full projections API:",
+        "https://www.fantasypros.com/api-data/"
+      ),
+      call. = FALSE
+    )
+  }
+  if(!requireNamespace("httr", quietly = TRUE)){
+    stop("The httr package is required to download FantasyPros projections.", call. = FALSE)
+  }
+  if(!requireNamespace("jsonlite", quietly = TRUE)){
+    stop("The jsonlite package is required to parse FantasyPros projections.", call. = FALSE)
+  }
+
+  url <- sprintf(
+    "https://api.fantasypros.com/public/v2/json/nfl/%s/projections",
+    as.integer(season)
+  )
+  response <- httr::GET(
+    url,
+    httr::add_headers(`x-api-key` = apiKey),
+    query = list(position = position, week = 0),
+    httr::timeout(30)
+  )
+
+  if(httr::status_code(response) != 200){
+    stop(
+      sprintf(
+        "FantasyPros API request for %s failed with HTTP %s. Check FANTASYPROS_API_KEY and API access.",
+        position,
+        httr::status_code(response)
+      ),
+      call. = FALSE
+    )
+  }
+
+  payload <- jsonlite::fromJSON(
+    httr::content(response, as = "text", encoding = "UTF-8"),
+    simplifyVector = FALSE
+  )
+  parseFantasyProsProjections(payload, position)
+}
 
 
 # dat <- downloadData()
@@ -22,114 +358,54 @@ require(purrr)
 
 downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
                          PassYds = 1/20, PassTD = 4, INT = -2, RYDS = 1/10, 
-                         RTDS = 6, FL = -2, REC = 1, RecYds = 1/10, RecTDs = 6){
-  
-  
-  
-  
-  scrapeTable <- function(url){
-    site <- read_html(url)
-    tables <- site %>%
-      html_nodes("table") %>%
-      html_table()
-    tab <- tables[which.max(sapply(tables, nrow))][[1]]
-    rowOne <- which(tab[,1] == "Player") + 1
-    # rowOne <- max(which(sapply(tab[,1], function(x) length(strsplit(x, ' ')[[1]])) == 1)) + 1
-    return(tab[rowOne:nrow(tab),])
-  }
-  
-  
-  scrapeADP <- function(url){
-    site <- read_html(url)
-    tables <- site %>%
-      html_nodes("table") %>%
-      html_table()
-    tab <- tables[which.max(sapply(tables, nrow))][[1]]
-    return(tab)
-  }
-  
-  scrapeExperts <- function(){
-    tab <- read.csv("FantasyPros_2023_Draft_ALL_Rankings.csv")
-    return(tab)
-  }
+                         RTDS = 6, FL = -2, REC = 1, RecYds = 1/10, RecTDs = 6,
+                         season = as.integer(format(Sys.Date(), "%Y")),
+                         apiKey = Sys.getenv("FANTASYPROS_API_KEY")){
+
   cat("Pulling projections... \n")
-  qb_fp <- scrapeTable('https://www.fantasypros.com/nfl/projections/qb.php?week=draft')
-  rb_fp <- scrapeTable("https://www.fantasypros.com/nfl/projections/rb.php?week=draft")
-  wr_fp <- scrapeTable("https://www.fantasypros.com/nfl/projections/wr.php?week=draft")
-  te_fp <- scrapeTable("https://www.fantasypros.com/nfl/projections/te.php?week=draft")
-  k <- scrapeADP("http://www.fantasypros.com/nfl/adp/k.php")
-  DST <- scrapeADP("http://www.fantasypros.com/nfl/adp/dst.php")
-  
-  names <- strsplit(unlist(k[,'Player Team (Bye)']),' ')
-  colnames(qb_fp) <- c('Player','PATT','CMP','YDS','TDS','INTS','ATT','RYDS','RTDS','FL','FPTS')
-  colnames(te_fp) <- c('Player','REC','YDS','TDS','FL','FPTS')
-  colnames(wr_fp) <- c('Player','REC','YDS','TDS','ATT','RYDS','RTDS','FL','FPTS')
-  colnames(rb_fp) <- c('Player','ATT','YDS','TDS','REC','RYDS','RTDS','FL','FPTS')
-  qb_fp[,'YDS'] <- gsub(",", "", unlist(qb_fp[,'YDS']), fixed = TRUE)
-  qb_fp[,'RYDS'] <- gsub(",", "", unlist(qb_fp[,'RYDS']), fixed = TRUE) 
-  
-  
-  qb_fp[,c('YDS','TDS','INTS','RYDS','RTDS','FL')] <- sapply(c('YDS','TDS','INTS','RYDS','RTDS','FL'), function(x) as.numeric(unlist(qb_fp[,x])))
-  qb_fp$FPTS <- as.matrix((qb_fp[,c('YDS','TDS','INTS','RYDS','RTDS','FL')])) %*% c(PassYds,PassTD,INT,RYDS,RTDS,FL)
-  
-  rb_fp[,'YDS'] <- gsub(",", "", unlist(rb_fp[,'YDS']), fixed = TRUE) 
-  rb_fp[,'RYDS']<- gsub(",", "", unlist(rb_fp[,'RYDS']), fixed = TRUE) 
-  
-  rb_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')] <- sapply(c('YDS','TDS','RYDS','RTDS','FL','REC'), function(x) as.numeric(unlist(rb_fp[,x])))
-  rb_fp$FPTS <- as.matrix((rb_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')])) %*% c(RYDS,RTDS,RecYds,RecTDs,FL, REC)
-  
-  
-  wr_fp[,'YDS'] <- gsub(",", "", unlist(wr_fp[,'YDS']), fixed = TRUE) 
-  wr_fp[,'RYDS']<- gsub(",", "", unlist(wr_fp[,'RYDS']), fixed = TRUE) 
-  
-  wr_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')] <- sapply(c('YDS','TDS','RYDS','RTDS','FL','REC'), function(x) as.numeric(unlist(wr_fp[,x])))
-  wr_fp$FPTS <- as.matrix((wr_fp[,c('YDS','TDS','RYDS','RTDS','FL','REC')])) %*% c(RecYds,RecTDs,RYDS,RTDS,FL,REC)
-  
-  
-  te_fp[,'YDS'] <- gsub(",", "", unlist(te_fp[,'YDS']), fixed = TRUE) 
-  te_fp[,c('YDS','TDS','FL','REC')] <- sapply(c('YDS','TDS','FL','REC'), function(x) as.numeric(unlist(te_fp[,x])))
-  te_fp$FPTS <- as.matrix((te_fp[,c('YDS','TDS','FL','REC')])) %*% c(RecYds,RecTDs,FL,REC)
-  
-  
-  k.names <- c()
-  for (i in 1:length(names)){
-    name_first <- names[[i]][1]
-    name_last <- names[[i]][2]
-    name <- paste(name_first,name_last)
-    k.names <- c(k.names, name)
+  projections <- list(
+    QB = fetchFantasyProsProjections("QB", season, apiKey),
+    RB = fetchFantasyProsProjections("RB", season, apiKey),
+    WR = fetchFantasyProsProjections("WR", season, apiKey),
+    TE = fetchFantasyProsProjections("TE", season, apiKey)
+  )
+
+  scoreProjection <- function(projection, position){
+    fpts <- if(position == "QB"){
+      projection$pass_yds * PassYds +
+        projection$pass_tds * PassTD +
+        projection$pass_ints * INT +
+        projection$rush_yds * RYDS +
+        projection$rush_tds * RTDS +
+        projection$fumbles * FL
+    } else {
+      projection$rush_yds * RYDS +
+        projection$rush_tds * RTDS +
+        projection$rec_yds * RecYds +
+        projection$rec_tds * RecTDs +
+        projection$fumbles * FL +
+        projection$receptions * REC
+    }
+
+    projection %>%
+      transmute(
+        FantasyProsID,
+        Player = paste(PlayerName, Team),
+        PlayerFile,
+        FPTS = as.numeric(fpts),
+        Pos = position
+      )
   }
-  k$name <- k.names
-  names <- strsplit(unlist(DST[,'Player Team (Bye)']),' ')
-  
-  DST.names <- c()
-  for (i in 1:length(names)){
-    name_first <- names[[i]][1]
-    name_last <- names[[i]][2]
-    name <- paste(name_first,name_last)
-    DST.names <- c(DST.names, name)
-  }
-  
-  DST$name <- DST.names
-  
-  
-  if(REC == 1){
-    experts <- scrapeExperts()  
-  } else if (REC == .5){
-    experts <- scrapeExperts("https://www.fantasypros.com/nfl/rankings/ppr-cheatsheets.php")
-  } else{
-    experts <- scrapeExperts("https://www.fantasypros.com/nfl/rankings/half-point-ppr-cheatsheets.php")
-  }
-  
-  names(experts)[1] <- 'Rank'
-  qb_fp <- cbind(qb_fp,'QB')
-  rb_fp <- cbind(rb_fp,'RB')
-  wr_fp <- cbind(wr_fp,'WR')
-  te_fp <- cbind(te_fp,'TE')
-  names(qb_fp)[ncol(qb_fp)] <- names(rb_fp)[ncol(rb_fp)] <- names(wr_fp)[ncol(wr_fp)] <- names(te_fp)[ncol(te_fp)] <- 'Pos'
-  qb_fp$FPTS <- as.numeric(qb_fp$FPTS)
-  rb_fp$FPTS <- as.numeric(rb_fp$FPTS)
-  wr_fp$FPTS <- as.numeric(wr_fp$FPTS)
-  te_fp$FPTS <- as.numeric(te_fp$FPTS)
+
+  qb_fp <- scoreProjection(projections$QB, "QB")
+  rb_fp <- scoreProjection(projections$RB, "RB")
+  wr_fp <- scoreProjection(projections$WR, "WR")
+  te_fp <- scoreProjection(projections$TE, "TE")
+
+  cat("Pulling rankings and ADP... \n")
+  experts <- fetchFantasyProsRankings(REC)
+  k <- fetchFantasyProsADP("k", experts)
+  DST <- fetchFantasyProsADP("dst", experts)
   
   
  
@@ -144,12 +420,27 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   wr_fp <- wr_fp[order(wr_fp$FPTS, decreasing = TRUE),]
   te_fp <- te_fp[order(te_fp$FPTS, decreasing = TRUE),]
   tewr_fp <- bind_rows(wr_fp, te_fp) %>% arrange(desc(FPTS))
-  
+
+  replacementPoints <- function(players, rank, position){
+    if(length(rank) != 1 || is.na(rank) || rank <= 1 || rank >= nrow(players)){
+      stop(
+        sprintf(
+          "%s replacement rank %s is invalid; FantasyPros returned %s eligible players.",
+          position,
+          rank,
+          nrow(players)
+        ),
+        call. = FALSE
+      )
+    }
+    mean(players$FPTS[c(rank - 1, rank, rank + 1)], na.rm = TRUE)
+  }
+
   ## Calculate Replacement Levels
-  qbr <- mean(qb_fp[qbrepl, 'FPTS'], qb_fp[qbrepl+1,'FPTS'], qb_fp[qbrepl-1,'FPTS'])
-  rbr <- mean(rb_fp[rbrepl, 'FPTS'], rb_fp[rbrepl+1,'FPTS'], rb_fp[rbrepl-1,'FPTS'])
-  wrr <- mean(tewr_fp[wrrepl, 'FPTS'], tewr_fp[wrrepl+1,'FPTS'], tewr_fp[wrrepl-1,'FPTS'])
-  ter <- mean(tewr_fp[terepl, 'FPTS'], tewr_fp[terepl+1,'FPTS'], tewr_fp[terepl-1,'FPTS'])
+  qbr <- replacementPoints(qb_fp, qbrepl, "QB")
+  rbr <- replacementPoints(rb_fp, rbrepl, "RB")
+  wrr <- replacementPoints(tewr_fp, wrrepl, "WR/TE")
+  ter <- replacementPoints(tewr_fp, terepl, "WR/TE")
   
   qb_fp$VORP <- qb_fp$FPTS - qbr
   rb_fp$VORP <- rb_fp$FPTS - rbr
@@ -162,53 +453,27 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   wr_fp$cluster <- clusterPlayers(wr_fp, 10)
   te_fp$cluster <- clusterPlayers(te_fp, 10)
   
-  fp_all <- rbind(qb_fp[,c('Player','FPTS','Pos','VORP','cluster')], rb_fp[,c('Player','FPTS','Pos','VORP','cluster')],wr_fp[,c('Player','FPTS','Pos','VORP','cluster')], te_fp[,c('Player','FPTS','Pos','VORP','cluster')])
-  
-  names <- strsplit(str_replace(fp_all$Player, "'", ""),' ')
-  
-  fp_all.names <- c()
-  name_first <- map(names, 1)
-  name_last <- map(names, 2)
-  suffix <- map(names, 3)
-  name_last <- ifelse(suffix %in% c('Jr.','II','III','IV'), paste(name_last, suffix), name_last)
-  fp_all.names <- paste(name_first, name_last)
-  
-  fp_all$name <- fp_all.names
-  
-  new <- experts %>% mutate(Player = paste(PLAYER.NAME, TEAM),
-                            Pos = substring(POS, 1, 2))  #%>% filter(str_detect(Player, '\\.'))
-  
-  
-  # new$PlayerName <- NA
-  # for(i in 1:nrow(new)){
-  #   
-  #   
-  #   if(str_detect(new[i,'Player'], 'Jr.')){
-  #     endNum <- 2
-  #   } else{
-  #     endNum <- 1
-  #   }
-  #   
-  #   if(substring(new[i,'Player'], 2, 2) == '.'){
-  #     endNum <- endNum + 2
-  #   }
-  #   
-  #   end <- str_locate_all(new[i,'Player'], '\\.')[[1]]
-  #   end <- end[endNum,'start']
-  #   
-  #   spString <- str_split(new$Player[i], ' ')[[1]]
-  #   tm <- spString[[length(spString)]]
-  #   
-  #   new$PlayerName[i] <- tolower(str_sub(new[i,'Player'], 1, end-2))
-  # }
-  
-  all <- fp_all %>% mutate(name = tolower(name)) %>% arrange(desc(VORP)) %>% left_join(new %>% mutate(ADP = Rank + as.numeric(ECR.VS..ADP)) %>% select(Player, Best = BEST, Worst = WORST, Avg = AVG.,`Std Dev` = STD.DEV, ADP), by = c('Player' = 'Player'))
-  
-  
-  
-  
-  
-  all <- all[order(all$VORP, decreasing=T),c('Player','Pos','FPTS','VORP', 'Avg','Std Dev', 'Best','Worst','cluster','ADP')]
+  fp_all <- bind_rows(
+    qb_fp %>% select(FantasyProsID, Player, PlayerFile, FPTS, Pos, VORP, cluster),
+    rb_fp %>% select(FantasyProsID, Player, PlayerFile, FPTS, Pos, VORP, cluster),
+    wr_fp %>% select(FantasyProsID, Player, PlayerFile, FPTS, Pos, VORP, cluster),
+    te_fp %>% select(FantasyProsID, Player, PlayerFile, FPTS, Pos, VORP, cluster)
+  )
+
+  all <- fp_all %>%
+    arrange(desc(VORP)) %>%
+    left_join(
+      experts %>% select(FantasyProsID, Best, Worst, Avg, `Std Dev`, ADP),
+      by = "FantasyProsID"
+    )
+
+  all <- all[
+    order(all$VORP, decreasing = TRUE),
+    c(
+      'FantasyProsID', 'Player', 'PlayerFile', 'Pos', 'FPTS', 'VORP',
+      'Avg', 'Std Dev', 'Best', 'Worst', 'cluster', 'ADP'
+    )
+  ]
   rownames(all) <- 1:nrow(all)
   all[,c('FPTS','VORP')] <- round(all[,c('FPTS','VORP')])
   qbs <- all[which(all[,'Pos']=='QB'),]
@@ -252,14 +517,6 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   
   
   
-  top <- function(df,n){
-    print(df[1:n,])
-  }
-  
-  colnames(DST)[3] <- 'Player'
-  colnames(k)[3] <- 'Player'
-  
-  all$Player <- str_replace(all$Player, "'", '')
   all$Pos <- as.character(all$Pos)
   
   all$team <- NA_character_
@@ -283,9 +540,18 @@ downloadData <- function(qbrepl = 14, rbrepl = 38, wrrepl = 38, terepl = 12,
   # all$Avg <- ifelse(is.na(all$Avg), Inf, all$Avg)
   
   all$Rnk <- 1:nrow(all)
-  
-  all <- all %>% mutate(PlayerName = tolower(str_replace(trimws(substring(Player, 1, nchar(Player)-3)), ' ', '-')),
-             PlayerLink = paste0('<a href = "https://www.fantasypros.com/nfl/projections/', PlayerName, '.php" target="_blank">', Player, '</a>'))
+
+  all <- all %>%
+    mutate(
+      PlayerLink = paste0(
+        '<a href = "https://www.fantasypros.com/nfl/projections/',
+        PlayerFile,
+        '" target="_blank">',
+        Player,
+        '</a>'
+      )
+    ) %>%
+    select(-FantasyProsID, -PlayerFile)
   
   outList <- list(players = all, 
                   def = DST,
@@ -368,4 +634,3 @@ clusterPlayers <- function(players, n = 10){
 # dbDisconnect(con)
 # 
 # 
-
