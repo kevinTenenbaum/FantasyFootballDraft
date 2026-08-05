@@ -46,7 +46,7 @@ old schema are detected and refreshed automatically.
 From R:
 
 ```r
-install.packages(c("nflreadr", "arrow", "jsonlite"))
+install.packages(c("nflreadr", "arrow", "jsonlite", "quantreg"))
 ```
 
 The collector does not install packages automatically or write outside this
@@ -141,14 +141,18 @@ Rscript nflverse-projections/score_all_seasons.R --start=2020 --end=2025
 
 ## Simple total-points model
 
-`build_simple_linear_model.R` creates separate QB, RB, WR, and TE linear models
-for next-season total fantasy points. It uses prior fantasy points, two-year
-points, availability, position/depth role shrinkage, depth rank, draft capital,
-age, experience, rookie status, and a rookie-by-draft-capital interaction. It
-also allows prior scoring rate to have different effects by depth-chart role.
-It deliberately does not include team passing or rushing forecasts yet. Historical predictions use five-fold
-cross-validation grouped by player, so every season for a player is held out
-from the models used to predict that player's rows.
+`build_simple_linear_model.R` creates separate QB, RB, WR, and TE models for
+next-season total fantasy points. The mean projection uses linear regression,
+and P10, P50, and P90 projections use quantile regression so the uncertainty
+estimates can be asymmetric. Predictions use the same zero-point floor as the
+mean model, and independently fitted quantiles are monotonically rearranged if
+they cross. All four models use prior fantasy points, two-year points, availability,
+position/depth role shrinkage, depth rank, draft capital, age, experience,
+rookie status, and a rookie-by-draft-capital interaction. They also allow prior
+scoring rate to have different effects by depth-chart role. The models
+deliberately do not include team passing or rushing forecasts yet. Historical
+predictions use five-fold cross-validation grouped by player, so every season
+for a player is held out from the models used to predict that player's rows.
 
 ```sh
 Rscript nflverse-projections/build_simple_linear_model.R
@@ -162,6 +166,17 @@ data/derived/simple_linear_training_data.csv
 data/derived/simple_linear_role_priors.csv
 data/derived/simple_linear_projections_2026.csv
 data/models/simple_linear_models.rds
+data/models/simple_linear_quantile_models.rds
+```
+
+The training and projection CSVs store the mean and uncertainty projections in
+the same rows:
+
+```text
+projected_fantasy_points,
+projected_fantasy_points_p10,
+projected_fantasy_points_p50,
+projected_fantasy_points_p90
 ```
 
 Evaluate the grouped out-of-fold predictions with:
@@ -176,8 +191,38 @@ statistics. It also writes detailed summaries to:
 ```text
 data/derived/simple_linear_accuracy_summary.csv
 data/derived/simple_linear_calibration_summary.csv
+data/derived/simple_linear_uncertainty_summary.csv
 data/derived/simple_linear_largest_misses.csv
 ```
+
+## Public draft availability model
+
+`build_availability_model.R` downloads current aggregate ADP data from
+[Fantasy Football Calculator](https://fantasyfootballcalculator.com/), joins it
+to the independent player projections, and estimates the probability that each
+player remains available at every pick. The default availability model is
+configured for 2026, 12 teams, 15 rounds, and PPR scoring.
+
+```sh
+Rscript nflverse-projections/build_availability_model.R
+```
+
+The model treats each matched player's public ADP and standard deviation as a
+bounded discrete normal draft-position distribution. Players absent from the
+public ADP sample are retained with `match_method = "unmatched"` and
+availability probability 1 at every pick, rather than being assigned unsupported
+draft behavior. Raw dated source responses are cached under
+`data/raw/public_adp/`, and the per-player, per-pick result is written to:
+
+```text
+data/derived/player_availability_2026.csv
+```
+
+Useful overrides include `--season=YEAR`, `--scoring=FORMAT`, `--teams=N`,
+`--rounds=N`, `--adp-json=PATH`, `--projections=PATH`, and `--output=PATH`.
+Supplying `--adp-json` rebuilds from a saved response without making a network
+request. The availability output is not yet connected to draft valuation or the
+web application.
 
 Candidate nonlinear terms and interactions can be compared on the same player
 folds with:

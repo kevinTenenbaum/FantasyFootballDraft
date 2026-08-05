@@ -29,6 +29,11 @@ training_path <- file.path(
   "simple_linear_training_data.csv"
 )
 output_dir <- file.path(script_dir, "data", "derived")
+quantile_levels <- c(p10 = 0.10, p50 = 0.50, p90 = 0.90)
+quantile_prediction_columns <- paste0(
+  "projected_fantasy_points_",
+  names(quantile_levels)
+)
 
 metric_row <- function(rows, group_type, group) {
   calibration_model <- lm(
@@ -77,6 +82,50 @@ summarize_groups <- function(rows, column, group_type = column) {
   do.call(rbind, output)
 }
 
+pinball_loss <- function(actual, predicted, probability) {
+  residual <- actual - predicted
+  mean(residual * (probability - as.integer(residual < 0)))
+}
+
+uncertainty_metric_row <- function(rows, group_type, group) {
+  actual <- rows$target_points
+  p10 <- rows$projected_fantasy_points_p10
+  p50 <- rows$projected_fantasy_points_p50
+  p90 <- rows$projected_fantasy_points_p90
+
+  data.frame(
+    group_type = group_type,
+    group = as.character(group),
+    n = nrow(rows),
+    p10_empirical_probability = mean(actual <= p10),
+    p50_empirical_probability = mean(actual <= p50),
+    p90_empirical_probability = mean(actual <= p90),
+    p10_pinball_loss = pinball_loss(actual, p10, quantile_levels[["p10"]]),
+    p50_pinball_loss = pinball_loss(actual, p50, quantile_levels[["p50"]]),
+    p90_pinball_loss = pinball_loss(actual, p90, quantile_levels[["p90"]]),
+    interval_80_coverage = mean(actual >= p10 & actual <= p90),
+    below_p10_rate = mean(actual < p10),
+    above_p90_rate = mean(actual > p90),
+    mean_interval_width = mean(p90 - p10),
+    median_interval_width = median(p90 - p10),
+    stringsAsFactors = FALSE
+  )
+}
+
+summarize_uncertainty_groups <- function(rows, column, group_type = column) {
+  groups <- sort(unique(rows[[column]]))
+  output <- vector("list", length(groups))
+  for (index in seq_along(groups)) {
+    group <- groups[[index]]
+    output[[index]] <- uncertainty_metric_row(
+      rows[rows[[column]] == group, , drop = FALSE],
+      group_type,
+      group
+    )
+  }
+  do.call(rbind, output)
+}
+
 calibration_bins <- function(rows, position_label) {
   ordered_rows <- order(rows$projected_fantasy_points, rows$target_points)
   rows$calibration_decile <- NA_integer_
@@ -107,6 +156,26 @@ calibration_bins <- function(rows, position_label) {
 
 evaluate_predictions <- function(path = training_path) {
   training <- utils::read.csv(path, stringsAsFactors = FALSE)
+  missing_quantile_columns <- setdiff(
+    quantile_prediction_columns,
+    names(training)
+  )
+  if (length(missing_quantile_columns)) {
+    stop(
+      "Missing quantile predictions: ",
+      paste(missing_quantile_columns, collapse = ", "),
+      ". Run build_simple_linear_model.R first.",
+      call. = FALSE
+    )
+  }
+  quantiles_out_of_order <-
+    training$projected_fantasy_points_p10 >
+      training$projected_fantasy_points_p50 |
+    training$projected_fantasy_points_p50 >
+      training$projected_fantasy_points_p90
+  if (any(quantiles_out_of_order)) {
+    stop("Quantile predictions are not monotonically ordered.", call. = FALSE)
+  }
 
   accuracy_summary <- rbind(
     metric_row(training, "overall", "all_players"),
@@ -114,6 +183,14 @@ evaluate_predictions <- function(path = training_path) {
     summarize_groups(training, "season"),
     summarize_groups(training, "depth_role"),
     summarize_groups(training, "cv_fold")
+  )
+
+  uncertainty_summary <- rbind(
+    uncertainty_metric_row(training, "overall", "all_players"),
+    summarize_uncertainty_groups(training, "position"),
+    summarize_uncertainty_groups(training, "season"),
+    summarize_uncertainty_groups(training, "depth_role"),
+    summarize_uncertainty_groups(training, "cv_fold")
   )
 
   calibration_summary <- calibration_bins(training, "ALL")
@@ -134,7 +211,7 @@ evaluate_predictions <- function(path = training_path) {
   miss_columns <- c(
     "season", "player_id", "player_name", "team", "position",
     "depth_role", "cv_fold", "target_points", "projected_fantasy_points",
-    "prediction_error"
+    quantile_prediction_columns, "prediction_error"
   )
   underpredictions <- head(
     training[order(training$prediction_error), miss_columns],
@@ -159,6 +236,11 @@ evaluate_predictions <- function(path = training_path) {
     row.names = FALSE
   )
   utils::write.csv(
+    uncertainty_summary,
+    file.path(output_dir, "simple_linear_uncertainty_summary.csv"),
+    row.names = FALSE
+  )
+  utils::write.csv(
     largest_misses,
     file.path(output_dir, "simple_linear_largest_misses.csv"),
     row.names = FALSE
@@ -167,6 +249,7 @@ evaluate_predictions <- function(path = training_path) {
   list(
     accuracy = accuracy_summary,
     calibration = calibration_summary,
+    uncertainty = uncertainty_summary,
     largest_misses = largest_misses
   )
 }
@@ -177,6 +260,14 @@ cat("Grouped out-of-fold accuracy and calibration summary\n\n")
 print(
   evaluation_results$accuracy[
     evaluation_results$accuracy$group_type %in% c("overall", "position"),
+  ],
+  row.names = FALSE,
+  digits = 3
+)
+cat("\nQuantile calibration and 80% interval coverage\n\n")
+print(
+  evaluation_results$uncertainty[
+    evaluation_results$uncertainty$group_type %in% c("overall", "position"),
   ],
   row.names = FALSE,
   digits = 3

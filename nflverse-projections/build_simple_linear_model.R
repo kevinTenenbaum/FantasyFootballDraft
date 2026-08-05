@@ -50,6 +50,19 @@ role_shrink_games <- 4
 role_prior_position_weight <- 10
 cv_folds <- 5L
 cv_seed <- 20260805L
+quantile_levels <- c(p10 = 0.10, p50 = 0.50, p90 = 0.90)
+quantile_prediction_columns <- paste0(
+  "projected_fantasy_points_",
+  names(quantile_levels)
+)
+
+if (!requireNamespace("quantreg", quietly = TRUE)) {
+  stop(
+    "Package 'quantreg' is required for uncertainty projections. ",
+    "Install it with install.packages('quantreg').",
+    call. = FALSE
+  )
+}
 
 read_dataset_files <- function(dataset) {
   paths <- list.files(
@@ -301,6 +314,73 @@ predict_position_models <- function(fitted_models, rows) {
   predictions
 }
 
+fit_position_quantile_models <- function(training_rows) {
+  fitted_models <- setNames(vector("list", length(positions)), positions)
+
+  for (position_name in positions) {
+    position_training <- training_rows[
+      training_rows$position == position_name,
+      ,
+      drop = FALSE
+    ]
+    position_models <- setNames(
+      vector("list", length(quantile_levels)),
+      names(quantile_levels)
+    )
+    for (quantile_name in names(quantile_levels)) {
+      position_models[[quantile_name]] <- quantreg::rq(
+        model_formula,
+        tau = unname(quantile_levels[[quantile_name]]),
+        data = position_training,
+        method = "fn"
+      )
+    }
+    fitted_models[[position_name]] <- position_models
+  }
+
+  fitted_models
+}
+
+predict_position_quantile_models <- function(fitted_models, rows) {
+  predictions <- matrix(
+    NA_real_,
+    nrow = nrow(rows),
+    ncol = length(quantile_levels),
+    dimnames = list(NULL, quantile_prediction_columns)
+  )
+
+  for (position_name in positions) {
+    position_rows <- rows$position == position_name
+    for (quantile_name in names(quantile_levels)) {
+      prediction_column <- paste0(
+        "projected_fantasy_points_",
+        quantile_name
+      )
+      predictions[position_rows, prediction_column] <- pmax(
+        0,
+        predict(
+          fitted_models[[position_name]][[quantile_name]],
+          newdata = rows[position_rows, , drop = FALSE]
+        )
+      )
+    }
+  }
+
+  if (any(!is.finite(predictions))) {
+    stop("Quantile models produced non-finite predictions.", call. = FALSE)
+  }
+
+  crossed <- predictions[, 1L] > predictions[, 2L] |
+    predictions[, 2L] > predictions[, 3L]
+  predictions <- t(apply(predictions, 1L, sort))
+  colnames(predictions) <- quantile_prediction_columns
+
+  list(
+    predictions = predictions,
+    crossing_count = sum(crossed)
+  )
+}
+
 set.seed(cv_seed)
 player_folds <- training_base[
   !duplicated(training_base$player_id),
@@ -321,6 +401,10 @@ training$role_prior <- NA_real_
 training$position_mean <- NA_real_
 training$shrunk_prior_ppg <- NA_real_
 training$projected_fantasy_points <- NA_real_
+for (prediction_column in quantile_prediction_columns) {
+  training[[prediction_column]] <- NA_real_
+}
+oof_quantile_crossings <- 0L
 
 for (fold in seq_len(cv_folds)) {
   fold_training_base <- training_base[training_base$cv_fold != fold, ]
@@ -338,6 +422,13 @@ for (fold in seq_len(cv_folds)) {
   fold_validation <- fold_data$projection
   fold_models <- fit_position_models(fold_training)
   fold_predictions <- predict_position_models(fold_models, fold_validation)
+  fold_quantile_models <- fit_position_quantile_models(fold_training)
+  fold_quantile_result <- predict_position_quantile_models(
+    fold_quantile_models,
+    fold_validation
+  )
+  oof_quantile_crossings <- oof_quantile_crossings +
+    fold_quantile_result$crossing_count
 
   output_rows <- match(
     fold_validation$training_row_id,
@@ -348,6 +439,10 @@ for (fold in seq_len(cv_folds)) {
   training$position_mean[output_rows] <- fold_validation$position_mean
   training$shrunk_prior_ppg[output_rows] <- fold_validation$shrunk_prior_ppg
   training$projected_fantasy_points[output_rows] <- fold_predictions
+  for (prediction_column in quantile_prediction_columns) {
+    training[[prediction_column]][output_rows] <-
+      fold_quantile_result$predictions[, prediction_column]
+  }
 }
 
 full_shrunk <- add_role_shrinkage(training_base, projection_base)
@@ -356,6 +451,15 @@ model_training <- full_data$training
 projection <- full_data$projection
 models <- fit_position_models(model_training)
 projection$projected_fantasy_points <- predict_position_models(models, projection)
+quantile_models <- fit_position_quantile_models(model_training)
+projection_quantile_result <- predict_position_quantile_models(
+  quantile_models,
+  projection
+)
+for (prediction_column in quantile_prediction_columns) {
+  projection[[prediction_column]] <-
+    projection_quantile_result$predictions[, prediction_column]
+}
 
 projection$position_rank <- ave(
   projection$projected_fantasy_points,
@@ -367,10 +471,17 @@ projection_output <- projection[order(-projection$projected_fantasy_points), c(
   "season", "player_id", "player_name", "team", "position", "position_rank",
   "depth_rank", "depth_role", "prior_points", "prior_games", "prior_ppg",
   "role_prior", "shrunk_prior_ppg", "availability_1yr", "availability_2yr",
-  "draft_pick", "age", "years_exp", "rookie", "projected_fantasy_points"
+  "draft_pick", "age", "years_exp", "rookie", "projected_fantasy_points",
+  quantile_prediction_columns
 )]
-projection_output$projected_fantasy_points <- round(
-  projection_output$projected_fantasy_points, 2
+rounded_prediction_columns <- c(
+  "projected_fantasy_points",
+  quantile_prediction_columns
+)
+projection_output[rounded_prediction_columns] <- lapply(
+  projection_output[rounded_prediction_columns],
+  round,
+  digits = 2
 )
 
 dir.create(derived_dir, recursive = TRUE, showWarnings = FALSE)
@@ -397,14 +508,23 @@ utils::write.csv(
   na = ""
 )
 saveRDS(models, file.path(model_dir, "simple_linear_models.rds"))
+saveRDS(
+  quantile_models,
+  file.path(model_dir, "simple_linear_quantile_models.rds")
+)
 
 cat("Built QB/RB/WR/TE linear models using seasons ",
     min(training_seasons), "-", max(training_seasons), ".\n", sep = "")
 cat("Added grouped ", cv_folds,
-    "-fold out-of-fold predictions for the training rows.\n", sep = "")
+    "-fold out-of-fold mean and quantile predictions for the training rows.\n",
+    sep = "")
+cat("Rearranged ", oof_quantile_crossings,
+    " crossing out-of-fold quantile rows and ",
+    projection_quantile_result$crossing_count,
+    " crossing projection rows.\n", sep = "")
 cat("Wrote ", nrow(projection_output), " projections for ", target_season, ".\n\n",
     sep = "")
 print(utils::head(projection_output[c(
   "player_name", "position", "position_rank", "depth_role",
-  "projected_fantasy_points"
+  "projected_fantasy_points", quantile_prediction_columns
 )], 30L), row.names = FALSE)
