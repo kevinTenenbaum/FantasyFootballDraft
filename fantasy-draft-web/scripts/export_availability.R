@@ -1,13 +1,14 @@
 args <- commandArgs(trailingOnly = TRUE)
 
-input_path <- if (length(args) >= 1) args[[1]] else "../nflverse-projections/data/derived/player_availability_2026.csv"
+input_path <- if (length(args) >= 1) args[[1]] else "../nflverse-projections/data/derived/player_availability_12_team_2026.csv"
 output_path <- if (length(args) >= 2) args[[2]] else "public/availability.json"
 
 availability <- read.csv(input_path, stringsAsFactors = FALSE)
 required_columns <- c(
   "season", "scoring_format", "teams", "rounds", "source",
   "source_total_drafts", "source_start_date", "source_end_date", "player_id",
-  "match_method", "pick", "availability_probability"
+  "source_rounds", "calibration_method", "calibration_pool_size",
+  "match_method", "adp", "pick", "availability_probability"
 )
 missing_columns <- setdiff(required_columns, names(availability))
 if (length(missing_columns)) {
@@ -20,7 +21,8 @@ if (length(missing_columns)) {
 
 model_rows <- unique(availability[c(
   "season", "scoring_format", "teams", "rounds", "source",
-  "source_total_drafts", "source_start_date", "source_end_date"
+  "source_total_drafts", "source_start_date", "source_end_date",
+  "source_rounds", "calibration_method", "calibration_pool_size"
 )])
 if (nrow(model_rows) != 1L) {
   stop("Availability data must contain exactly one model configuration.", call. = FALSE)
@@ -36,6 +38,7 @@ players <- lapply(player_rows, function(rows) {
   }
   list(
     matchMethod = rows$match_method[[1L]],
+    adp = round(as.numeric(rows$adp[[1L]]), 1L),
     probabilities = unname(round(rows$availability_probability, 6L))
   )
 })
@@ -51,6 +54,9 @@ payload <- list(
     totalDrafts = as.integer(model$source_total_drafts),
     startDate = model$source_start_date,
     endDate = model$source_end_date,
+    sourceRounds = as.integer(model$source_rounds),
+    calibrationMethod = model$calibration_method,
+    calibrationPoolSize = as.integer(model$calibration_pool_size),
     maxPick = as.integer(max(availability$pick))
   ),
   players = players

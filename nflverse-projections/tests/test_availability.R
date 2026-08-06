@@ -8,14 +8,17 @@ test_dir <- if (length(script_file)) {
 }
 source(file.path(dirname(test_dir), "R", "availability.R"))
 
-curve <- bounded_draft_survival(adp = 5, adp_sd = 2, max_pick = 10L)
+curve <- lower_bounded_draft_survival(adp = 5, adp_sd = 2, max_pick = 10L)
+long_curve <- lower_bounded_draft_survival(adp = 5, adp_sd = 2, max_pick = 20L)
 stopifnot(length(curve) == 10L)
 stopifnot(curve[[1L]] == 1)
 stopifnot(all(diff(curve) <= 0))
 stopifnot(all(curve >= 0 & curve <= 1))
+stopifnot(isTRUE(all.equal(curve, long_curve[seq_along(curve)])))
+stopifnot(curve[[10L]] > 0)
 
-point_curve <- bounded_draft_survival(adp = 4, adp_sd = 0, max_pick = 10L)
-stopifnot(identical(point_curve, c(1, 1, 1, 1, 0, 0, 0, 0, 0, 0)))
+point_curve <- lower_bounded_draft_survival(adp = 12, adp_sd = 0, max_pick = 10L)
+stopifnot(identical(point_curve, rep(1, 10L)))
 
 projections <- data.frame(
   player_id = c("gsis-1", "gsis-2", "gsis-3", "gsis-4"),
@@ -27,17 +30,35 @@ projections <- data.frame(
   stringsAsFactors = FALSE
 )
 public_adp <- data.frame(
-  player_id = c(101, 102, 103),
-  name = c("DJ Example", "Traded Player", "Kenny Example"),
-  position = c("WR", "RB", "RB"),
-  team = c("LAR", "MIA", "TB"),
-  adp = c(5, 8, 9),
-  times_drafted = c(100, 80, 60),
-  high = c(1, 3, 4),
-  low = c(10, 14, 15),
-  stdev = c(2, 3, 3),
+  player_id = 101:112,
+  name = c(
+    "DJ Example", "Traded Player", "Kenny Example", "Quarterback One",
+    "Quarterback Two", "Receiver Two", "Receiver Three", "Tight End One",
+    "Tight End Two", "Example Defense", "Example Kicker", "Runner Three"
+  ),
+  position = c("WR", "RB", "RB", "QB", "QB", "WR", "WR", "TE", "TE", "DEF", "PK", "RB"),
+  team = c("LAR", "MIA", "TB", "BUF", "KC", "PHI", "DAL", "SF", "DET", "DEN", "BAL", "CHI"),
+  adp = seq(1.5, 8.5, length.out = 12),
+  times_drafted = rep(100, 12),
+  high = 1:12,
+  low = 4:15,
+  stdev = rep(2, 12),
   stringsAsFactors = FALSE
 )
+
+prepared_adp <- prepare_public_adp(public_adp)
+calibration <- calibrate_public_availability(prepared_adp, max_pick = 10L)
+expected_drafted <- colSums(1 - calibration$curves)
+stopifnot(max(abs(expected_drafted - 0:9)) < 1e-5)
+stopifnot(all(apply(calibration$curves, 1L, function(player_curve) {
+  all(diff(player_curve) <= 1e-8)
+})))
+rb_share <- sum(prepared_adp$times_drafted[prepared_adp$position == "RB"]) /
+  sum(prepared_adp$times_drafted)
+rb_drafted_before_pick_10 <- sum(
+  1 - calibration$curves[prepared_adp$position == "RB", 10L]
+)
+stopifnot(abs(rb_drafted_before_pick_10 - 9 * rb_share) < 0.75)
 
 availability <- build_availability_table(
   projections,

@@ -1,4 +1,5 @@
-# Build per-pick player availability curves from public aggregate ADP data.
+# Build slot- and position-calibrated per-pick player availability curves from
+# public aggregate ADP data.
 
 normalize_availability_name <- function(name) {
   normalized <- iconv(as.character(name), to = "ASCII//TRANSLIT")
@@ -55,9 +56,11 @@ prepare_public_adp <- function(players) {
     function(value) suppressWarnings(as.numeric(value))
   )
   players$position <- toupper(as.character(players$position))
+  players$position[players$position == "DEF"] <- "DST"
+  players$position[players$position == "PK"] <- "K"
   players$team <- as.character(players$team)
   players <- players[
-    players$position %in% c("QB", "RB", "WR", "TE") &
+    players$position %in% c("QB", "RB", "WR", "TE", "DST", "K") &
       is.finite(players$adp),
     ,
     drop = FALSE
@@ -156,7 +159,7 @@ match_public_adp <- function(projections, public_adp) {
   output
 }
 
-bounded_draft_survival <- function(adp, adp_sd, max_pick) {
+lower_bounded_draft_survival <- function(adp, adp_sd, max_pick) {
   if (
     length(adp) != 1L || !is.finite(adp) ||
       length(max_pick) != 1L || !is.finite(max_pick) || max_pick < 1L
@@ -167,34 +170,221 @@ bounded_draft_survival <- function(adp, adp_sd, max_pick) {
   support <- seq_len(max_pick)
 
   if (length(adp_sd) != 1L || !is.finite(adp_sd) || adp_sd <= 0) {
-    selected_pick <- min(max(1L, as.integer(round(adp))), max_pick)
+    selected_pick <- max(1L, as.integer(round(adp)))
     return(as.numeric(support <= selected_pick))
   }
 
-  weights <- stats::dnorm(support, mean = adp, sd = adp_sd)
-  if (!all(is.finite(weights)) || sum(weights) <= 0) {
-    selected_pick <- min(max(1L, as.integer(round(adp))), max_pick)
-    weights <- as.numeric(support == selected_pick)
-  }
-  weights <- weights / sum(weights)
-  survival <- rev(cumsum(rev(weights)))
+  lower_tail <- stats::pnorm(
+    0.5,
+    mean = adp,
+    sd = adp_sd,
+    lower.tail = FALSE
+  )
+  survival <- stats::pnorm(
+    support - 0.5,
+    mean = adp,
+    sd = adp_sd,
+    lower.tail = FALSE
+  ) / lower_tail
   pmin(1, pmax(0, survival))
+}
+
+public_pick_cdf <- function(threshold, adp, adp_sd) {
+  adp <- as.numeric(adp)
+  adp_sd <- as.numeric(adp_sd)
+  output <- numeric(length(adp))
+  deterministic <- !is.finite(adp_sd) | adp_sd <= 0
+
+  if (any(deterministic)) {
+    selected_pick <- pmax(1L, as.integer(round(adp[deterministic])))
+    output[deterministic] <- as.numeric(threshold > selected_pick)
+  }
+  if (any(!deterministic)) {
+    indexes <- which(!deterministic)
+    lower_tail <- stats::pnorm(
+      0.5,
+      mean = adp[indexes],
+      sd = adp_sd[indexes],
+      lower.tail = FALSE
+    )
+    remaining_tail <- stats::pnorm(
+      threshold,
+      mean = adp[indexes],
+      sd = adp_sd[indexes],
+      lower.tail = FALSE
+    )
+    output[indexes] <- 1 - remaining_tail / lower_tail
+  }
+
+  pmin(1, pmax(0, output))
+}
+
+capped_position_targets <- function(shares, capacities, total) {
+  shares <- pmax(0, as.numeric(shares))
+  capacities <- pmax(0, as.numeric(capacities))
+  if (!length(shares) || length(shares) != length(capacities)) {
+    stop("shares and capacities must have the same positive length.", call. = FALSE)
+  }
+  if (sum(capacities) + 1e-8 < total) {
+    stop("Public ADP does not contain enough players for the draft horizon.", call. = FALSE)
+  }
+  if (sum(shares) <= 0) shares[] <- 1
+
+  targets <- numeric(length(shares))
+  active <- capacities > 0
+  remaining <- as.numeric(total)
+  while (remaining > 1e-8 && any(active)) {
+    active_shares <- shares[active]
+    if (sum(active_shares) <= 0) active_shares[] <- 1
+    proposed <- remaining * active_shares / sum(active_shares)
+    room <- capacities[active] - targets[active]
+    accepted <- pmin(proposed, room)
+    targets[active] <- targets[active] + accepted
+    remaining <- total - sum(targets)
+    newly_full <- room - accepted <= 1e-8
+    active[which(active)[newly_full]] <- FALSE
+    if (!any(newly_full)) break
+  }
+
+  if (remaining > 1e-6) {
+    room <- pmax(0, capacities - targets)
+    targets <- targets + remaining * room / sum(room)
+  }
+  targets
+}
+
+solve_participation <- function(base_weight, end_cdf, target) {
+  if (target <= 0) return(rep(0, length(base_weight)))
+  capacity <- sum(end_cdf)
+  if (target >= capacity - 1e-8) return(rep(1, length(base_weight)))
+
+  objective <- function(log_multiplier) {
+    participation <- pmin(1, exp(log_multiplier) * base_weight)
+    sum(participation * end_cdf) - target
+  }
+  lower <- -20
+  upper <- 20
+  while (objective(lower) > 0) lower <- lower - 10
+  while (objective(upper) < 0) upper <- upper + 10
+  multiplier <- exp(stats::uniroot(
+    objective,
+    interval = c(lower, upper),
+    tol = 1e-10
+  )$root)
+  pmin(1, multiplier * base_weight)
+}
+
+calibrate_public_availability <- function(public_adp, max_pick, participation_prior = 5) {
+  max_pick <- as.integer(max_pick)
+  if (length(max_pick) != 1L || is.na(max_pick) || max_pick < 1L) {
+    stop("max_pick must be a positive integer.", call. = FALSE)
+  }
+  if (nrow(public_adp) < max_pick) {
+    stop("Public ADP must contain at least one player per modeled pick.", call. = FALSE)
+  }
+
+  positions <- c("QB", "RB", "WR", "TE", "DST", "K")
+  end_threshold <- max_pick + 0.5
+  end_cdf <- public_pick_cdf(
+    end_threshold,
+    public_adp$adp,
+    public_adp$stdev
+  )
+  drafted_counts <- pmax(0, public_adp$times_drafted)
+  position_frequency <- vapply(
+    positions,
+    function(position) sum(drafted_counts[public_adp$position == position]),
+    numeric(1)
+  )
+  position_capacity <- vapply(
+    positions,
+    function(position) sum(end_cdf[public_adp$position == position]),
+    numeric(1)
+  )
+  position_targets <- capped_position_targets(
+    position_frequency,
+    position_capacity,
+    max_pick
+  )
+  names(position_targets) <- positions
+
+  participation <- numeric(nrow(public_adp))
+  for (position in positions) {
+    indexes <- which(public_adp$position == position)
+    if (!length(indexes)) next
+    participation[indexes] <- solve_participation(
+      drafted_counts[indexes] + participation_prior,
+      end_cdf[indexes],
+      position_targets[[position]]
+    )
+  }
+
+  expected_drafted <- function(threshold) {
+    sum(participation * public_pick_cdf(
+      threshold,
+      public_adp$adp,
+      public_adp$stdev
+    ))
+  }
+  source_clock <- numeric(max_pick)
+  curves <- matrix(
+    1,
+    nrow = nrow(public_adp),
+    ncol = max_pick,
+    dimnames = list(as.character(public_adp$player_id), as.character(seq_len(max_pick)))
+  )
+  for (pick in seq_len(max_pick)) {
+    target <- pick - 1
+    if (target == 0) {
+      source_clock[[pick]] <- 0.5
+      next
+    }
+    objective <- function(threshold) expected_drafted(threshold) - target
+    threshold <- stats::uniroot(
+      objective,
+      interval = c(0.5, end_threshold),
+      tol = 1e-10
+    )$root
+    source_clock[[pick]] <- threshold
+    curves[, pick] <- 1 - participation * public_pick_cdf(
+      threshold,
+      public_adp$adp,
+      public_adp$stdev
+    )
+  }
+
+  curves[] <- pmin(1, pmax(0, curves))
+  expected_before_pick <- colSums(1 - curves)
+  if (max(abs(expected_before_pick - (seq_len(max_pick) - 1))) > 1e-5) {
+    stop("Availability calibration failed to conserve draft slots.", call. = FALSE)
+  }
+  if (any(apply(curves, 1L, function(curve) any(diff(curve) > 1e-8)))) {
+    stop("Availability calibration produced a non-monotone curve.", call. = FALSE)
+  }
+
+  list(
+    curves = curves,
+    participation = participation,
+    position_targets = position_targets,
+    source_clock = source_clock
+  )
 }
 
 build_availability_table <- function(projections, public_adp, max_pick) {
   public_adp <- prepare_public_adp(public_adp)
   matched <- match_public_adp(projections, public_adp)
+  calibration <- calibrate_public_availability(public_adp, max_pick)
   picks <- seq_len(as.integer(max_pick))
   output <- vector("list", nrow(matched))
 
   for (row_index in seq_len(nrow(matched))) {
     is_matched <- matched$match_method[[row_index]] != "unmatched"
     availability <- if (is_matched) {
-      bounded_draft_survival(
-        matched$public_adp_adp[[row_index]],
-        matched$public_adp_stdev[[row_index]],
-        max_pick
+      public_index <- match(
+        matched$public_adp_player_id[[row_index]],
+        as.character(public_adp$player_id)
       )
+      unname(calibration$curves[public_index, ])
     } else {
       rep(1, length(picks))
     }

@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  OPTIMIZATION_CANDIDATES_PER_GROUP,
+  OPTIMIZATION_SCENARIOS,
+  type DraftRecommendation,
+} from "./draftOptimization";
+import DraftOptimizationWorker from "./draftOptimization.worker?worker&inline";
+import { simulateToFocusTeam, type MockDraftPick } from "./mockDraft";
 
 type Position = "QB" | "RB" | "WR" | "TE" | "DST" | "K";
 
@@ -20,13 +27,7 @@ type Player = {
   rookie: boolean;
 };
 
-type Pick = {
-  playerId: string;
-  teamIndex: number;
-  overall: number;
-  round: number;
-  pickInRound: number;
-};
+type Pick = MockDraftPick;
 
 type PlayerSummary = {
   bullets: string[];
@@ -112,7 +113,9 @@ type SavedDraft = {
   rounds: number;
   picks: Pick[];
   rosterTeam: number;
-  focusTeam: number;
+  focusTeam?: number;
+  focusTeams?: number[];
+  mockMode: boolean;
 };
 
 type AvailabilityData = {
@@ -125,16 +128,19 @@ type AvailabilityData = {
     totalDrafts: number;
     startDate: string;
     endDate: string;
+    sourceRounds: number;
+    calibrationMethod: string;
+    calibrationPoolSize: number;
     maxPick: number;
   };
-  players: Record<string, { matchMethod: string; probabilities: number[] }>;
+  players: Record<string, { matchMethod: string; adp: number; probabilities: number[] }>;
 };
 
 type RosterEntry = { pick: Pick; player: Player };
 type RosterSlot = { id: string; label: string; group: "starter" | "bench" | "reserve"; entry?: RosterEntry };
 
 const STORAGE_KEY = "fantasy-draft-room-v1";
-const DEFAULT_TEAMS = [
+const LEGACY_DEFAULT_TEAMS = [
   "Fourth & Long",
   "Gridiron Guild",
   "Sunday Scaries",
@@ -145,11 +151,29 @@ const DEFAULT_TEAMS = [
   "Two Minute Drill",
   "The Audible",
   "Bye Week Bandits",
+  "End Zone Empire",
+  "Hail Mary Heroes",
+];
+const DEFAULT_TEAMS = [
+  "Esperanza's Iguana's",
+  "CTE? TBD",
+  "P and J Pizzas",
+  "Alantrees",
+  "Hail Victory",
+  "BigPugs",
+  "Jocks for Rocks",
+  "Orca Whales",
+  "Flowers for Lamar",
+  "The Bravehearts",
+  "Fauci Ouchies",
+  "Best us",
 ];
 const MODELED_POSITIONS: Position[] = ["QB", "RB", "WR", "TE"];
 const POSITIONS: Position[] = [...MODELED_POSITIONS, "DST", "K"];
 const REPLACEMENT_RANK: Record<Position, number> = { QB: 14, RB: 36, WR: 46, TE: 16, DST: 12, K: 12 };
 const POSITION_MAXIMUMS: Record<Position, number> = { QB: 4, RB: 8, WR: 8, TE: 4, DST: 3, K: 3 };
+const PASS_CATCHER_REPLACEMENT_RANK = 62;
+const PASS_CATCHER_MAXIMUM = 8;
 const ROSTER_SIZE = 16;
 const STARTER_COUNT = 9;
 const BENCH_COUNT = 7;
@@ -166,6 +190,10 @@ function getPickSlot(index: number, teamCount: number) {
   };
 }
 
+function hasSameTeamOrder(teams: string[], expected: string[]) {
+  return teams.length === expected.length && teams.every((team, index) => team === expected[index]);
+}
+
 function initials(name: string) {
   return name
     .split(/\s+/)
@@ -177,6 +205,10 @@ function initials(name: string) {
 
 function formatPoints(value: number) {
   return value.toFixed(1);
+}
+
+function formatAdp(value: number | undefined) {
+  return value === undefined || !Number.isFinite(value) ? "—" : value.toFixed(1);
 }
 
 function formatProbability(value: number) {
@@ -275,8 +307,17 @@ function assignRoster(picks: Pick[], playerById: Map<string, Player>) {
 
 function draftRosterIssue(player: Player, candidatePick: Pick, picks: Pick[], playerById: Map<string, Player>) {
   const teamPicks = picks.filter((pick) => pick.teamIndex === candidatePick.teamIndex);
-  const positionCount = teamPicks.filter((pick) => playerById.get(pick.playerId)?.position === player.position).length;
-  if (positionCount >= POSITION_MAXIMUMS[player.position]) {
+  const isPassCatcher = player.position === "WR" || player.position === "TE";
+  const positionCount = teamPicks.filter((pick) => {
+    const draftedPosition = playerById.get(pick.playerId)?.position;
+    return isPassCatcher
+      ? draftedPosition === "WR" || draftedPosition === "TE"
+      : draftedPosition === player.position;
+  }).length;
+  if (isPassCatcher && positionCount >= PASS_CATCHER_MAXIMUM) {
+    return `WR/TE maximum reached (${PASS_CATCHER_MAXIMUM})`;
+  }
+  if (!isPassCatcher && positionCount >= POSITION_MAXIMUMS[player.position]) {
     return `${player.position === "DST" ? "D/ST" : player.position} maximum reached (${POSITION_MAXIMUMS[player.position]})`;
   }
   const simulated = assignRoster([...teamPicks, candidatePick], playerById);
@@ -294,7 +335,8 @@ export default function DraftRoom() {
   const [rounds, setRounds] = useState(ROSTER_SIZE);
   const [picks, setPicks] = useState<Pick[]>([]);
   const [rosterTeam, setRosterTeam] = useState(0);
-  const [focusTeam, setFocusTeam] = useState(0);
+  const [focusTeams, setFocusTeams] = useState<number[]>([0]);
+  const [mockMode, setMockMode] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [position, setPosition] = useState<"ALL" | Position>("ALL");
   const [search, setSearch] = useState("");
@@ -302,7 +344,7 @@ export default function DraftRoom() {
   const [setupError, setSetupError] = useState("");
   const [summaryCard, setSummaryCard] = useState<SummaryCard | null>(null);
   const [detailPlayerId, setDetailPlayerId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"seasons" | "games" | "model">("seasons");
+  const [detailTab, setDetailTab] = useState<"seasons" | "games" | "model">("model");
   const [playerHistory, setPlayerHistory] = useState<PlayerHistoryData | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
@@ -310,6 +352,7 @@ export default function DraftRoom() {
   const [interpretabilityLoading, setInterpretabilityLoading] = useState(false);
   const [interpretabilityError, setInterpretabilityError] = useState("");
   const detailCloseRef = useRef<HTMLButtonElement>(null);
+  const detailTriggerIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -332,13 +375,30 @@ export default function DraftRoom() {
         setAvailabilityData(availability);
         if (saved) {
           const parsed = JSON.parse(saved) as SavedDraft;
-          if (Array.isArray(parsed.teams) && parsed.teams.length >= 2) {
+          const savedPicks = parsed.picks ?? [];
+          const isUntouchedLegacySetup = parsed.phase === "setup" &&
+            savedPicks.length === 0 &&
+            Array.isArray(parsed.teams) &&
+            hasSameTeamOrder(parsed.teams, LEGACY_DEFAULT_TEAMS);
+          if (
+            Array.isArray(parsed.teams) &&
+            parsed.teams.length === availability.model.teamCount &&
+            ROSTER_SIZE === availability.model.rounds &&
+            !isUntouchedLegacySetup
+          ) {
             setPhase(parsed.phase);
             setTeams(parsed.teams);
             setRounds(ROSTER_SIZE);
-            setPicks(parsed.picks ?? []);
+            setPicks(savedPicks);
             setRosterTeam(parsed.rosterTeam ?? 0);
-            setFocusTeam(Math.min(Math.max(parsed.focusTeam ?? 0, 0), parsed.teams.length - 1));
+            const restoredMockMode = Boolean(parsed.mockMode);
+            const storedFocusTeams = Array.isArray(parsed.focusTeams)
+              ? parsed.focusTeams
+              : [parsed.focusTeam ?? 0];
+            const validFocusTeams = [...new Set(storedFocusTeams)]
+              .filter((teamIndex) => Number.isInteger(teamIndex) && teamIndex >= 0 && teamIndex < parsed.teams.length);
+            setFocusTeams((validFocusTeams.length ? validFocusTeams : [0]).slice(0, restoredMockMode ? 1 : 2));
+            setMockMode(restoredMockMode);
           }
         }
       })
@@ -348,9 +408,18 @@ export default function DraftRoom() {
 
   useEffect(() => {
     if (!ready) return;
-    const state: SavedDraft = { phase, teams, rounds, picks, rosterTeam, focusTeam };
+    const state: SavedDraft = {
+      phase,
+      teams,
+      rounds,
+      picks,
+      rosterTeam,
+      focusTeam: focusTeams[0] ?? 0,
+      focusTeams,
+      mockMode,
+    };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [phase, teams, rounds, picks, rosterTeam, focusTeam, ready]);
+  }, [phase, teams, rounds, picks, rosterTeam, focusTeams, mockMode, ready]);
 
   useEffect(() => {
     if (!detailPlayerId) return;
@@ -365,8 +434,15 @@ export default function DraftRoom() {
   const draftedIds = useMemo(() => new Set(picks.map((pick) => pick.playerId)), [picks]);
   const playerById = useMemo(() => new Map(players.map((player) => [player.id, player])), [players]);
   const replacementPoints = useMemo(() => {
+    const passCatcherPool = players
+      .filter((player) => player.position === "WR" || player.position === "TE")
+      .sort((a, b) => b.projectedPoints - a.projectedPoints);
+    const passCatcherReplacement = passCatcherPool[
+      Math.min(PASS_CATCHER_REPLACEMENT_RANK - 1, passCatcherPool.length - 1)
+    ]?.projectedPoints ?? 0;
     return Object.fromEntries(
       POSITIONS.map((pos) => {
+        if (pos === "WR" || pos === "TE") return [pos, passCatcherReplacement];
         const pool = players
           .filter((player) => player.position === pos)
           .sort((a, b) => b.projectedPoints - a.projectedPoints);
@@ -421,23 +497,138 @@ export default function DraftRoom() {
   const currentSlot = getPickSlot(picks.length, teams.length);
   const isComplete = picks.length >= teams.length * rounds;
   const currentTeam = teams[currentSlot.teamIndex] ?? "";
+  const primaryFocusTeam = focusTeams[0] ?? 0;
+  const focusedTeamSet = useMemo(() => new Set(focusTeams), [focusTeams]);
+  const isCurrentFocusTeam = focusedTeamSet.has(currentSlot.teamIndex);
+  const isSimulating = mockMode && phase === "draft" && !isComplete && currentSlot.teamIndex !== primaryFocusTeam;
+  const availabilityMatchesLeague = Boolean(
+    availabilityData &&
+    availabilityData.model.teamCount === teams.length &&
+    availabilityData.model.rounds === rounds,
+  );
+  const nextSelectedFocusSlot = useMemo(() => {
+    const maximum = teams.length * rounds;
+    for (let pickIndex = picks.length; pickIndex < maximum; pickIndex += 1) {
+      const slot = getPickSlot(pickIndex, teams.length);
+      if (focusedTeamSet.has(slot.teamIndex)) return slot;
+    }
+    return null;
+  }, [focusedTeamSet, picks.length, rounds, teams.length]);
+  const analysisFocusTeam = isCurrentFocusTeam
+    ? currentSlot.teamIndex
+    : nextSelectedFocusSlot?.teamIndex ?? primaryFocusTeam;
+  const focusedTeamNames = focusTeams.map((teamIndex) => teams[teamIndex]).filter(Boolean);
+  const analysisFocusTeamName = teams[analysisFocusTeam] ?? "the next focus team";
   const nextFocusSlots = useMemo(() => {
     const maximum = teams.length * rounds;
     const slots: ReturnType<typeof getPickSlot>[] = [];
     for (let pickIndex = picks.length; pickIndex < maximum; pickIndex += 1) {
       const slot = getPickSlot(pickIndex, teams.length);
-      if (slot.teamIndex !== focusTeam) continue;
+      if (slot.teamIndex !== analysisFocusTeam) continue;
       slots.push(slot);
       if (slots.length === 2) break;
     }
     return slots;
-  }, [focusTeam, picks.length, rounds, teams.length]);
+  }, [analysisFocusTeam, picks.length, rounds, teams.length]);
   const availabilityAtFocusPick = useCallback((playerId: string, focusPickIndex: number) => {
     const slot = nextFocusSlots[focusPickIndex];
-    if (!slot) return null;
-    return availabilityData?.players[playerId]?.probabilities[slot.overall - 1] ?? null;
-  }, [availabilityData, nextFocusSlots]);
+    const probabilities = availabilityData?.players[playerId]?.probabilities;
+    if (!slot || !probabilities || !availabilityMatchesLeague) return null;
+    const currentOverall = picks.length + 1;
+    const currentProbability = probabilities[currentOverall - 1];
+    const futureProbability = probabilities[slot.overall - 1];
+    if (currentProbability === undefined || futureProbability === undefined) return null;
+    if (slot.overall === currentOverall) return 1;
+    if (currentProbability <= 0) return null;
+    return Math.min(1, Math.max(0, futureProbability / currentProbability));
+  }, [availabilityData, availabilityMatchesLeague, nextFocusSlots, picks.length]);
   const selectedPlayer = selectedId ? playerById.get(selectedId) : undefined;
+  const optimizationOnClock =
+    !isComplete &&
+    isCurrentFocusTeam &&
+    currentSlot.round <= 14 &&
+    availabilityMatchesLeague;
+  const optimizationRequestKey = `${currentSlot.overall}:${currentSlot.teamIndex}:${picks.map((pick) => pick.playerId).join(",")}`;
+  const [optimizationResult, setOptimizationResult] = useState<{
+    key: string;
+    recommendations: DraftRecommendation[];
+    error: string;
+  }>({ key: "", recommendations: [], error: "" });
+  const [expandedRecommendationId, setExpandedRecommendationId] = useState<string | null>(null);
+  const optimizationResultIsCurrent = optimizationResult.key === optimizationRequestKey;
+  const optimizationRecommendations = optimizationOnClock && optimizationResultIsCurrent
+    ? optimizationResult.recommendations
+    : [];
+  const optimizationError = optimizationOnClock && optimizationResultIsCurrent
+    ? optimizationResult.error
+    : "";
+  const optimizationLoading = optimizationOnClock && !optimizationResultIsCurrent;
+  useEffect(() => {
+    if (!optimizationOnClock || !availabilityData) return;
+    const rosterPlayerIds = picks
+      .filter((pick) => pick.teamIndex === currentSlot.teamIndex)
+      .map((pick) => pick.playerId);
+    const worker = new DraftOptimizationWorker({ name: "draft-optimization" });
+    worker.onmessage = (event: MessageEvent<{ recommendations?: DraftRecommendation[]; error?: string }>) => {
+      if (event.data.error) {
+        setOptimizationResult({ key: optimizationRequestKey, recommendations: [], error: event.data.error });
+      } else {
+        setOptimizationResult({ key: optimizationRequestKey, recommendations: event.data.recommendations ?? [], error: "" });
+      }
+      worker.terminate();
+    };
+    worker.onerror = () => {
+      setOptimizationResult({
+        key: optimizationRequestKey,
+        recommendations: [],
+        error: "Unable to calculate the live recommendation board.",
+      });
+      worker.terminate();
+    };
+    worker.postMessage({
+      players,
+      availability: availabilityData,
+      draftedPlayerIds: draftedIds,
+      rosterPlayerIds,
+      currentOverall: currentSlot.overall,
+      currentRound: currentSlot.round,
+      focusTeam: currentSlot.teamIndex,
+      teamCount: teams.length,
+    });
+    return () => worker.terminate();
+  }, [
+    availabilityData,
+    currentSlot.overall,
+    currentSlot.round,
+    draftedIds,
+    currentSlot.teamIndex,
+    optimizationOnClock,
+    optimizationRequestKey,
+    picks,
+    players,
+    teams.length,
+  ]);
+  useEffect(() => {
+    if (!isSimulating || !availabilityData) return;
+    const timer = window.setTimeout(() => {
+      setPicks((currentPicks) => simulateToFocusTeam({
+        picks: currentPicks,
+        players,
+        availability: availabilityData,
+        teamCount: teams.length,
+        rounds,
+        focusTeam: primaryFocusTeam,
+        getPickSlot,
+        canDraft: (player, candidate, simulatedPicks) => {
+          const fullPlayer = playerById.get(player.id);
+          return Boolean(fullPlayer && !draftRosterIssue(fullPlayer, candidate, simulatedPicks, playerById));
+        },
+      }));
+      setRosterTeam(primaryFocusTeam);
+      setSelectedId(null);
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [availabilityData, isSimulating, playerById, players, primaryFocusTeam, rounds, teams.length]);
   const selectedAvailabilitySummary = selectedPlayer ? nextFocusSlots.map((slot, focusPickIndex) => {
     const probability = availabilityAtFocusPick(selectedPlayer.id, focusPickIndex);
     return probability === null ? `No estimate at pick #${slot.overall}` : `${formatProbability(probability)} at pick #${slot.overall}`;
@@ -455,7 +646,8 @@ export default function DraftRoom() {
   const rosterAssignment = assignRoster(viewedRoster, playerById);
   const filledStarters = rosterAssignment.slots.filter((slot) => slot.group === "starter" && slot.entry).length;
   const filledBench = rosterAssignment.slots.filter((slot) => slot.group === "bench" && slot.entry).length;
-  const recentPicks = [...picks].reverse().slice(0, 5);
+  const recentPicks = [...picks].reverse();
+  const canUndo = mockMode ? picks.some((pick) => !pick.simulated) : picks.length > 0;
   const summaryPlayer = summaryCard ? playerById.get(summaryCard.playerId) : undefined;
   const activeSummary = summaryCard ? summaries[summaryCard.playerId] : undefined;
   const detailPlayer = detailPlayerId ? playerById.get(detailPlayerId) : undefined;
@@ -481,17 +673,17 @@ export default function DraftRoom() {
     });
   }
 
-  function openPlayerDetails(playerId: string) {
+  function openPlayerDetails(playerId: string, triggerId = `player-detail-trigger-${playerId}`) {
     setSummaryCard(null);
-    setDetailTab("seasons");
+    detailTriggerIdRef.current = triggerId;
     setDetailPlayerId(playerId);
-    loadPlayerHistory();
+    showModelInterpretability();
   }
 
   function closePlayerDetails() {
-    const playerId = detailPlayerId;
+    const triggerId = detailTriggerIdRef.current;
     setDetailPlayerId(null);
-    requestAnimationFrame(() => document.getElementById(`player-detail-trigger-${playerId}`)?.focus());
+    requestAnimationFrame(() => document.getElementById(triggerId ?? "")?.focus());
   }
 
   function loadPlayerHistory() {
@@ -506,6 +698,11 @@ export default function DraftRoom() {
       .then(setPlayerHistory)
       .catch((error: unknown) => setHistoryError(error instanceof Error ? error.message : "Player history could not be loaded."))
       .finally(() => setHistoryLoading(false));
+  }
+
+  function showHistoryTab(tab: "seasons" | "games") {
+    setDetailTab(tab);
+    loadPlayerHistory();
   }
 
   function showModelInterpretability() {
@@ -531,10 +728,46 @@ export default function DraftRoom() {
     setTeams((current) => [...current, `Team ${current.length + 1}`]);
   }
 
+  function toggleFocusTeam(index: number) {
+    setFocusTeams((current) => {
+      if (mockMode) return [index];
+      if (current.includes(index)) {
+        return current.length === 1 ? current : current.filter((teamIndex) => teamIndex !== index);
+      }
+      return current.length < 2 ? [...current, index] : current;
+    });
+  }
+
+  function setPrimaryFocusTeam(index: number) {
+    setFocusTeams((current) => {
+      if (mockMode || current.length === 1) return [index];
+      return current[1] === index ? [index, current[0]] : [index, current[1]];
+    });
+  }
+
+  function setSecondaryFocusTeam(value: string) {
+    setFocusTeams((current) => {
+      const primary = current[0] ?? 0;
+      if (!value) return [primary];
+      const secondary = Number(value);
+      return secondary === primary ? [primary] : [primary, secondary];
+    });
+  }
+
+  function updateMockMode(enabled: boolean) {
+    setMockMode(enabled);
+    if (enabled) setFocusTeams((current) => [current[0] ?? 0]);
+  }
+
   function removeTeam(index: number) {
     if (teams.length <= 2) return;
     setTeams((current) => current.filter((_, teamIndex) => teamIndex !== index));
-    setFocusTeam((current) => current === index ? Math.min(index, teams.length - 2) : current > index ? current - 1 : current);
+    setFocusTeams((current) => {
+      const adjusted = current
+        .filter((teamIndex) => teamIndex !== index)
+        .map((teamIndex) => teamIndex > index ? teamIndex - 1 : teamIndex);
+      return adjusted.length ? adjusted : [Math.min(index, teams.length - 2)];
+    });
     setRosterTeam((current) => current === index ? Math.min(index, teams.length - 2) : current > index ? current - 1 : current);
   }
 
@@ -548,17 +781,26 @@ export default function DraftRoom() {
       setSetupError("Team names need to be unique.");
       return;
     }
+    if (
+      availabilityData &&
+      (cleaned.length !== availabilityData.model.teamCount || ROSTER_SIZE !== availabilityData.model.rounds)
+    ) {
+      setSetupError(
+        `Availability is calibrated for ${availabilityData.model.teamCount} teams and ${availabilityData.model.rounds} rounds.`,
+      );
+      return;
+    }
     setTeams(cleaned);
     setRounds(ROSTER_SIZE);
     setPicks([]);
-    setRosterTeam(focusTeam);
+    setRosterTeam(primaryFocusTeam);
     setSelectedId(null);
     setSetupError("");
     setPhase("draft");
   }
 
   const draftPlayer = useCallback((playerId = selectedId) => {
-    if (!playerId || isComplete || draftedIds.has(playerId)) return;
+    if (!playerId || isComplete || isSimulating || draftedIds.has(playerId)) return;
     const player = playerById.get(playerId);
     if (!player) return;
     const slot = getPickSlot(picks.length, teams.length);
@@ -567,7 +809,7 @@ export default function DraftRoom() {
     setPicks((current) => [...current, candidate]);
     setRosterTeam(slot.teamIndex);
     setSelectedId(null);
-  }, [selectedId, isComplete, draftedIds, playerById, picks, teams.length]);
+  }, [selectedId, isComplete, isSimulating, draftedIds, playerById, picks, teams.length]);
 
   function togglePlayer(playerId: string) {
     setSelectedId((current) => current === playerId ? null : playerId);
@@ -575,6 +817,16 @@ export default function DraftRoom() {
 
   function undoPick() {
     if (!picks.length) return;
+    if (mockMode) {
+      let lastFocusPickIndex = picks.length - 1;
+      while (lastFocusPickIndex >= 0 && picks[lastFocusPickIndex].simulated) lastFocusPickIndex -= 1;
+      if (lastFocusPickIndex < 0) return;
+      const lastFocusPick = picks[lastFocusPickIndex];
+      setPicks((current) => current.slice(0, lastFocusPickIndex));
+      setSelectedId(lastFocusPick.playerId);
+      setRosterTeam(primaryFocusTeam);
+      return;
+    }
     const last = picks[picks.length - 1];
     setPicks((current) => current.slice(0, -1));
     setSelectedId(last.playerId);
@@ -589,10 +841,10 @@ export default function DraftRoom() {
   }
 
   function exportDraft() {
-    const rows = ["overall,round,pick,team,player,position,nfl_team,projected_points"];
+    const rows = ["overall,round,pick,team,player,position,nfl_team,projected_points,pick_type"];
     picks.forEach((pick) => {
       const player = playerById.get(pick.playerId);
-      const values = [pick.overall, pick.round, pick.pickInRound, teams[pick.teamIndex], player?.name, player?.position, player?.nflTeam, player?.projectedPoints];
+      const values = [pick.overall, pick.round, pick.pickInRound, teams[pick.teamIndex], player?.name, player?.position, player?.nflTeam, player?.projectedPoints, pick.simulated ? "simulated" : "focus"];
       rows.push(values.map((value) => `"${String(value ?? "").replaceAll('"', '""')}"`).join(","));
     });
     const href = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
@@ -621,9 +873,9 @@ export default function DraftRoom() {
       if (detailPlayerId) {
         if (event.key === "Escape") {
           event.preventDefault();
-          const playerId = detailPlayerId;
+          const triggerId = detailTriggerIdRef.current;
           setDetailPlayerId(null);
-          requestAnimationFrame(() => document.getElementById(`player-detail-trigger-${playerId}`)?.focus());
+          requestAnimationFrame(() => document.getElementById(triggerId ?? "")?.focus());
         }
         if (event.key === "Tab") {
           const modal = document.querySelector<HTMLElement>(".player-modal");
@@ -717,24 +969,31 @@ export default function DraftRoom() {
               <div><p className="step-label">Step 01</p><h2>Set your draft order</h2></div>
               <span className="team-count">{teams.length} teams</span>
             </div>
-            <p className="field-help">Teams draft top to bottom in Round 1, then the order reverses.</p>
+            <p className="field-help">Teams draft top to bottom in Round 1, then the order reverses. Choose up to two focus teams for a live draft.</p>
             <div className="team-fields">
-              {teams.map((team, index) => (
-                <div className={`team-field ${focusTeam === index ? "focus" : ""}`} key={index}>
+              {teams.map((team, index) => {
+                const focused = focusTeams.includes(index);
+                const focusLimitReached = !mockMode && !focused && focusTeams.length >= 2;
+                return <div className={`team-field ${focused ? "focus" : ""}`} key={index}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <input aria-label={`Team ${index + 1} name`} value={team} onChange={(event) => updateTeam(index, event.target.value)} />
-                  <button className="focus-team-button" type="button" aria-label={`${focusTeam === index ? "Focused team" : "Focus"} ${team || `team ${index + 1}`}`} aria-pressed={focusTeam === index} title={focusTeam === index ? "Focus team" : `Highlight ${team || `team ${index + 1}`}`} onClick={() => setFocusTeam(index)}>{focusTeam === index ? "★" : "☆"}</button>
+                  <button className="focus-team-button" type="button" aria-label={`${focused ? "Focused team" : "Focus"} ${team || `team ${index + 1}`}`} aria-pressed={focused} title={focused ? "Remove focus team" : focusLimitReached ? "Two focus teams already selected" : `Focus ${team || `team ${index + 1}`}`} onClick={() => toggleFocusTeam(index)} disabled={focusLimitReached}>{focused ? "★" : "☆"}</button>
                   <button className="icon-button" type="button" aria-label={`Remove ${team || `team ${index + 1}`}`} onClick={() => removeTeam(index)} disabled={teams.length <= 2}>×</button>
-                </div>
-              ))}
+                </div>;
+              })}
             </div>
             <button className="add-team" type="button" onClick={addTeam}>+ Add another team</button>
+            <label className={`mock-mode-toggle ${mockMode ? "active" : ""}`}>
+              <input type="checkbox" checked={mockMode} onChange={(event) => updateMockMode(event.target.checked)} />
+              <span><strong>Mock draft mode</strong><small>Simulate every other team, then stop when {teams[primaryFocusTeam] || "the focus team"} is on the clock. Mock drafts use one focus team.</small></span>
+              <i aria-hidden="true">{mockMode ? "On" : "Off"}</i>
+            </label>
             <div className="round-row">
               <div className="roster-config-label"><span>League roster</span><small>9 starters · 7 bench · 1 IR</small></div>
               <strong>{ROSTER_SIZE} rounds</strong>
             </div>
             {setupError && <p className="form-error" role="alert">{setupError}</p>}
-            <button className="primary-button start-button" type="button" onClick={startDraft}>Generate draft <span>→</span></button>
+            <button className="primary-button start-button" type="button" onClick={startDraft}>{mockMode ? "Start mock draft" : "Generate draft"} <span>→</span></button>
           </div>
         </section>
       </main>
@@ -749,18 +1008,20 @@ export default function DraftRoom() {
           <span style={{ width: `${(picks.length / (teams.length * rounds)) * 100}%` }} />
         </div>
         <div className="header-actions">
+          {mockMode && <span className="mock-mode-status">Mock mode</span>}
+          {mockMode && <button className="mock-revert-button" type="button" onClick={undoPick} disabled={!canUndo} title="Remove the last focus-team pick and replay from that turn">↶ Revert to last pick</button>}
           <span className="saved-status"><i /> Saved locally</span>
-          <button type="button" onClick={exportDraft} disabled={!picks.length}>Export</button>
+          <button className="export-button" type="button" onClick={exportDraft} disabled={!picks.length}>Export</button>
           <button type="button" onClick={newDraft}>New draft</button>
         </div>
       </header>
 
       <section className="on-clock" aria-live="polite">
         <div className="pick-number"><span>Round {isComplete ? rounds : currentSlot.round}</span><strong>{isComplete ? "Final" : `${currentSlot.round}.${String(currentSlot.pickInRound).padStart(2, "0")}`}</strong></div>
-        <div className={`clock-team ${!isComplete && currentSlot.teamIndex === focusTeam ? "focus" : ""}`}>
-          <div className="clock-status"><span className="live-pick-status"><i aria-hidden="true" />{isComplete ? "Draft complete" : "Now picking"}</span>{!isComplete && currentSlot.teamIndex === focusTeam && <span className="current-focus-badge">★ Focus team</span>}</div>
+        <div className={`clock-team ${!isComplete && isCurrentFocusTeam ? "focus" : ""}`}>
+          <div className="clock-status"><span className="live-pick-status"><i aria-hidden="true" />{isComplete ? "Draft complete" : isSimulating ? "Simulating picks" : "Now picking"}</span>{!isComplete && isCurrentFocusTeam && <span className="current-focus-badge">★ Focus team</span>}</div>
           <h1>{isComplete ? "Every roster is set" : currentTeam}</h1>
-          {!isComplete && <div className={`focus-tracker ${currentSlot.teamIndex === focusTeam ? "picking-now" : ""}`}><span>★ Focus team</span><strong>{teams[focusTeam]}</strong><small>{currentSlot.teamIndex === focusTeam ? "Picking now" : nextFocusSlots.length ? `Next ${nextFocusSlots.map((slot) => `#${slot.overall}`).join(" and ")}` : "No picks remaining"}</small></div>}
+          {!isComplete && <div className={`focus-tracker ${isCurrentFocusTeam ? "picking-now" : ""}`}><span>★ {focusTeams.length === 2 ? "Focus teams" : "Focus team"}</span><strong>{focusedTeamNames.join(" + ")}</strong><small>{isCurrentFocusTeam ? `${currentTeam} picking now` : nextFocusSlots.length ? `${analysisFocusTeamName} next at #${nextFocusSlots[0].overall}` : "No picks remaining"}</small></div>}
         </div>
         <div className="up-next">
           <span>Coming up</span>
@@ -768,7 +1029,8 @@ export default function DraftRoom() {
             const slotIndex = picks.length + offset;
             if (slotIndex >= teams.length * rounds) return null;
             const slot = getPickSlot(slotIndex, teams.length);
-            return <div className={`next-team ${slot.teamIndex === focusTeam ? "focus" : ""}`} key={offset}><i>{slot.teamIndex === focusTeam ? "★" : initials(teams[slot.teamIndex])}</i><span>{teams[slot.teamIndex]}</span><small>{slot.round}.{String(slot.pickInRound).padStart(2, "0")}</small></div>;
+            const focused = focusedTeamSet.has(slot.teamIndex);
+            return <div className={`next-team ${focused ? "focus" : ""}`} key={offset}><i>{focused ? "★" : initials(teams[slot.teamIndex])}</i><span>{teams[slot.teamIndex]}</span><small>{slot.round}.{String(slot.pickInRound).padStart(2, "0")}</small></div>;
           })}
         </div>
       </section>
@@ -783,10 +1045,123 @@ export default function DraftRoom() {
             </div>
           </div>
           <div className="focus-bar">
-            <div className="focus-team-picker"><span aria-hidden="true">★</span><label htmlFor="focus-team"><small>Focus team</small><select id="focus-team" value={focusTeam} onChange={(event) => setFocusTeam(Number(event.target.value))}>{teams.map((team, index) => <option value={index} key={team}>{team}</option>)}</select></label></div>
-            {nextFocusSlots.length ? <p><strong>Next {nextFocusSlots.length === 2 ? "picks" : "pick"} {nextFocusSlots.map((slot) => `#${slot.overall}`).join(" and ")}</strong><span>{nextFocusSlots.map((slot) => `Round ${slot.round}, pick ${slot.pickInRound}`).join(" · ")} · Availability estimates who reaches {teams[focusTeam]}.</span></p> : <p><strong>Draft complete</strong><span>{teams[focusTeam]} has no picks remaining.</span></p>}
-            {availabilityData && <small className="model-note">{availabilityData.model.teamCount}-team {availabilityData.model.scoringFormat.toUpperCase()} model · {availabilityData.model.totalDrafts.toLocaleString()} drafts</small>}
+            <div className="focus-team-picker"><span aria-hidden="true">★</span><div className="focus-team-controls"><small>{mockMode ? "Focus team" : "Focus teams"}</small><div className="focus-team-selects"><select id="focus-team" aria-label="Primary focus team" value={primaryFocusTeam} onChange={(event) => setPrimaryFocusTeam(Number(event.target.value))}>{teams.map((team, index) => <option value={index} key={team}>{team}</option>)}</select>{!mockMode && <select id="second-focus-team" aria-label="Second focus team" value={focusTeams[1] ?? ""} onChange={(event) => setSecondaryFocusTeam(event.target.value)}><option value="">One focus team</option>{teams.map((team, index) => index === primaryFocusTeam ? null : <option value={index} key={team}>{team}</option>)}</select>}</div></div></div>
+            {nextFocusSlots.length ? <p><strong>{analysisFocusTeamName} · Next {nextFocusSlots.length === 2 ? "picks" : "pick"} {nextFocusSlots.map((slot) => `#${slot.overall}`).join(" and ")}</strong><span>{nextFocusSlots.map((slot) => `Round ${slot.round}, pick ${slot.pickInRound}`).join(" · ")} · Availability odds follow whichever focused team picks next.</span></p> : <p><strong>Draft complete</strong><span>No focused-team picks remain.</span></p>}
+            {availabilityData && <small className="model-note">{availabilityMatchesLeague ? `${availabilityData.model.teamCount}-team ${availabilityData.model.scoringFormat.toUpperCase()} model · ${availabilityData.model.totalDrafts.toLocaleString()} drafts · conditioned on the live board` : `Availability paused · model supports ${availabilityData.model.teamCount} teams and ${availabilityData.model.rounds} rounds`}</small>}
           </div>
+          <section className={`optimization-board ${optimizationOnClock ? "active" : "paused"}`} aria-labelledby="optimization-board-title" aria-busy={optimizationLoading}>
+            <header className="optimization-heading">
+              <div><p className="eyebrow">Simulated draft outlook</p><h3 id="optimization-board-title">Best complete-roster paths</h3></div>
+              {optimizationOnClock
+                ? <span>{OPTIMIZATION_CANDIDATES_PER_GROUP} per roster group · {OPTIMIZATION_SCENARIOS} shared boards</span>
+                : <span>Focus-team decision support</span>}
+            </header>
+            {optimizationOnClock && optimizationRecommendations.length ? <div className="optimization-table-wrap">
+              <table className="optimization-table">
+                <thead><tr><th>Rank</th><th>Player</th><th className="numeric" title="Public average draft position">ADP</th><th className="numeric">Proj.</th><th className="numeric">VORP</th><th className="numeric">Pick value</th><th className="numeric">Next turn</th><th className="numeric">Expected roster</th><th className="numeric">P10</th><th className="numeric">P90</th><th aria-label="Draft recommendation" /></tr></thead>
+                <tbody>{optimizationRecommendations.map((recommendation) => {
+                  const issue = draftRosterIssue(
+                    recommendation.player as Player,
+                    { playerId: recommendation.player.id, ...currentSlot },
+                    picks,
+                    playerById,
+                  );
+                  const expanded = expandedRecommendationId === recommendation.player.id;
+                  const bestSimulationValue = Math.max(
+                    ...optimizationRecommendations.map((alternative) => alternative.meanScore),
+                  );
+                  const pickValue = Number.isFinite(bestSimulationValue)
+                    ? recommendation.meanScore - bestSimulationValue
+                    : 0;
+                  const nextTurnProbability = availabilityAtFocusPick(recommendation.player.id, 1);
+                  const vorp = recommendation.player.projectedPoints - replacementPoints[recommendation.player.position as Position];
+                  const toggleExpanded = () => {
+                    setSelectedId(recommendation.player.id);
+                    setExpandedRecommendationId((current) => current === recommendation.player.id ? null : recommendation.player.id);
+                  };
+                  return <Fragment key={recommendation.player.id}>
+                    <tr className={`${selectedId === recommendation.player.id ? "selected" : ""} ${expanded ? "expanded" : ""}`} onClick={toggleExpanded}>
+                      <td><button className="recommendation-rank-button" type="button" aria-expanded={expanded} aria-controls={`recommendation-details-${recommendation.player.id}`} onClick={(event) => { event.stopPropagation(); toggleExpanded(); }}><strong>#{recommendation.rank}</strong><span aria-hidden="true">{expanded ? "−" : "+"}</span></button></td>
+                      <td><div className="optimization-player"><span className={`pos-dot pos-${recommendation.player.position.toLowerCase()}`}>{recommendation.player.position}</span><div>
+                        <button
+                          className="player-summary-trigger optimizer-player-summary-trigger"
+                          id={`optimization-player-detail-trigger-${recommendation.player.id}`}
+                          type="button"
+                          aria-label={`View player details for ${recommendation.player.name}`}
+                          aria-haspopup="dialog"
+                          onMouseEnter={(event) => showPlayerSummary(recommendation.player.id, event.currentTarget)}
+                          onMouseLeave={() => setSummaryCard(null)}
+                          onFocus={(event) => showPlayerSummary(recommendation.player.id, event.currentTarget)}
+                          onBlur={() => setSummaryCard(null)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openPlayerDetails(recommendation.player.id, `optimization-player-detail-trigger-${recommendation.player.id}`);
+                          }}
+                        >
+                          <strong>{recommendation.player.name}</strong><i aria-hidden="true">i</i>
+                        </button>
+                        <small>{recommendation.player.nflTeam}</small>
+                      </div></div></td>
+                      <td className="numeric adp-cell" title={`${availabilityData.model.source} public average draft position`}>{formatAdp(availabilityData.players[recommendation.player.id]?.adp)}</td>
+                      <td className="numeric optimizer-projection">{formatPoints(recommendation.player.projectedPoints)}</td>
+                      <td className={`numeric optimizer-vorp ${vorp >= 0 ? "positive" : "negative"}`} title={`${recommendation.player.position} projection minus the position's replacement-level projection`}>{formatSigned(vorp)}</td>
+                      <td className={`numeric optimizer-value ${pickValue >= 0 ? "positive" : "negative"}`} title="Average simulated roster score relative to the strongest available pick">{Math.abs(pickValue) < 0.05 ? "0.0" : formatSigned(pickValue)}</td>
+                      <td className="numeric" title="Chance this player is available at the focus team's next turn">{nextTurnProbability === null ? "—" : formatProbability(nextTurnProbability)}</td>
+                      <td className="numeric">{formatPoints(recommendation.meanScore)}</td>
+                      <td className="numeric">{formatPoints(recommendation.p10Score)}</td>
+                      <td className="numeric">{formatPoints(recommendation.p90Score)}</td>
+                      <td><button type="button" className="optimizer-draft-button" disabled={Boolean(issue)} onClick={(event) => { event.stopPropagation(); draftPlayer(recommendation.player.id); }}>{issue ?? "Draft"}</button></td>
+                    </tr>
+                    {expanded && <tr className="recommendation-details-row">
+                      <td colSpan={11} id={`recommendation-details-${recommendation.player.id}`}>
+                        <div className="recommendation-details">
+                          <section aria-labelledby={`candidate-role-${recommendation.player.id}`}>
+                            <div className="recommendation-detail-heading"><div><p className="eyebrow">Why this pick ranks here</p><h4 id={`candidate-role-${recommendation.player.id}`}>Projected role and roster score</h4></div><small>Averages across {recommendation.scenarioCount} completed drafts</small></div>
+                            <div className="recommendation-diagnostic-grid">
+                              <div className="candidate-role-card">
+                                <h5>{recommendation.player.name}&apos;s final role</h5>
+                                <div className="candidate-role-probabilities">
+                                  <div><span>Starter</span><strong>{formatProbability(recommendation.candidateRoleProbabilities.starter)}</strong></div>
+                                  <div><span>FLEX</span><strong>{formatProbability(recommendation.candidateRoleProbabilities.flex)}</strong></div>
+                                  <div><span>Bench</span><strong>{formatProbability(recommendation.candidateRoleProbabilities.bench)}</strong></div>
+                                  <div><span>Outside scored roster</span><strong>{formatProbability(recommendation.candidateRoleProbabilities.outside)}</strong></div>
+                                </div>
+                              </div>
+                              <div className="roster-score-card">
+                                <h5>Expected roster score split</h5>
+                                <div className="roster-score-split">
+                                  <div><span>Starting lineup</span><strong>{formatPoints(recommendation.meanStarterScore)}</strong></div>
+                                  <div><span>Discounted bench</span><strong>{formatPoints(recommendation.meanBenchScore)}</strong></div>
+                                  <div className="total"><span>Total</span><strong>{formatPoints(recommendation.meanScore)}</strong></div>
+                                </div>
+                                <small>Bench points use the optimizer&apos;s depth-based discount, so they are not counted at full projection.</small>
+                              </div>
+                            </div>
+                          </section>
+                          <section aria-labelledby={`starter-probabilities-${recommendation.player.id}`}>
+                            <div className="recommendation-detail-heading"><div><p className="eyebrow">Starter coverage</p><h4 id={`starter-probabilities-${recommendation.player.id}`}>Probability each offensive slot is filled</h4></div><small>After {recommendation.scenarioCount} simulated boards</small></div>
+                            <div className="starter-probability-grid">{recommendation.starterSlotProbabilities.map((slot) => <div key={slot.key}><span>{slot.label}</span><strong>{formatProbability(slot.probability)}</strong><i aria-hidden="true"><b style={{ width: `${slot.probability * 100}%` }} /></i></div>)}</div>
+                          </section>
+                          <section aria-labelledby={`future-picks-${recommendation.player.id}`}>
+                            <div className="recommendation-detail-heading"><div><p className="eyebrow">Future rounds</p><h4 id={`future-picks-${recommendation.player.id}`}>Players selected in simulated paths</h4></div><small>Top outcomes at each focus-team pick</small></div>
+                            <div className="future-pick-distributions">{recommendation.futurePickDistributions.map((distribution) => <article key={distribution.overall}>
+                              <header><strong>Round {distribution.round}</strong><span>Pick #{distribution.overall}</span></header>
+                              <ol>{distribution.players.map((entry) => <li key={entry.player.id}><span><b>{entry.player.name}</b><small>{entry.player.position} · {entry.player.nflTeam}</small></span><strong>{formatProbability(entry.probability)}</strong></li>)}</ol>
+                              {distribution.otherProbability >= 0.01 && <p>Other paths <strong>{formatProbability(distribution.otherProbability)}</strong></p>}
+                            </article>)}</div>
+                          </section>
+                        </div>
+                      </td>
+                    </tr>}
+                  </Fragment>;
+                })}</tbody>
+              </table>
+            </div> : <div className="optimization-waiting">
+              <strong>{optimizationLoading ? "Testing complete-roster paths…" : optimizationError ? "Optimization unavailable" : isComplete ? "Draft complete" : currentSlot.round > 14 ? "Kicker and D/ST rounds" : !isCurrentFocusTeam ? `Waiting for ${analysisFocusTeamName}` : "Optimization unavailable"}</strong>
+              <span>{optimizationLoading ? `${OPTIMIZATION_SCENARIOS} shared survivor boards are being scored in the background.` : optimizationError || (!availabilityMatchesLeague && isCurrentFocusTeam) ? optimizationError || "The live league configuration must match the 12-team availability model." : isComplete ? "Every roster is set." : currentSlot.round > 14 ? "The offensive optimizer stops after Round 14 as configured." : !isCurrentFocusTeam ? `Recommendations refresh when ${analysisFocusTeamName} reaches pick #${nextFocusSlots[0]?.overall ?? "—"}.` : "No eligible offensive candidates remain."}</span>
+            </div>}
+            {optimizationOnClock && <p className="optimization-note">Rank, Pick value, Expected roster, P10, and P90 all come from the same concrete simulated boards. The best average simulated roster is the 0.0 Pick value baseline; negative values show the simulated cost of choosing another player. Select a row to inspect starter coverage and likely future picks.</p>}
+          </section>
           <div className="board-tools">
             <div className="position-tabs" role="group" aria-label="Filter by position">
               {(["ALL", ...POSITIONS] as const).map((pos) => <button type="button" className={position === pos ? "active" : ""} onClick={() => setPosition(pos)} key={pos}>{pos === "DST" ? "D/ST" : pos}</button>)}
@@ -808,7 +1183,7 @@ export default function DraftRoom() {
           </div>
           <div className="player-table-wrap">
             <table className="player-table">
-              <thead><tr><th>Rank</th><th>Player</th><th>Pos</th><th className="numeric">Proj.</th><th className="numeric">Value</th><th className="numeric" title="Volatility above or below similarly projected players at the same position">Risk+</th><th className="numeric availability-heading" title={nextFocusSlots.length ? `Modeled chance that the player is still available at ${teams[focusTeam]}'s next ${nextFocusSlots.length} pick${nextFocusSlots.length === 1 ? "" : "s"}` : "No focus-team picks remain"}>Next 2 picks{nextFocusSlots.length > 0 && <small>{nextFocusSlots.map((slot) => `#${slot.overall}`).join(" / ")}</small>}</th><th aria-label="Select player" /></tr></thead>
+              <thead><tr><th>Rank</th><th>Player</th><th>Pos</th><th className="numeric" title="Public average draft position">ADP</th><th className="numeric">Proj.</th><th className="numeric">Value</th><th className="numeric" title="Volatility above or below similarly projected players at the same position">Risk+</th><th className="numeric availability-heading" title={nextFocusSlots.length ? `Modeled chance that the player is still available at ${analysisFocusTeamName}'s next ${nextFocusSlots.length} pick${nextFocusSlots.length === 1 ? "" : "s"}` : "No focus-team picks remain"}>Next 2 picks{nextFocusSlots.length > 0 && <small>{analysisFocusTeamName} · {nextFocusSlots.map((slot) => `#${slot.overall}`).join(" / ")}</small>}</th><th aria-label="Select player" /></tr></thead>
               <tbody>
                 {available.slice(0, 350).map((player, index) => {
                   const value = player.projectedPoints - replacementPoints[player.position];
@@ -842,6 +1217,7 @@ export default function DraftRoom() {
                         <span className="player-meta">{player.nflTeam} · {player.depthRole}{player.rookie ? " · Rookie" : ""}</span>
                       </div></td>
                       <td><span className={`pos-badge pos-${player.position.toLowerCase()}`}>{player.position === "DST" ? "D/ST" : player.position}{modeled ? player.positionRank : ""}</span></td>
+                      <td className="numeric adp-cell" title={`${availabilityData?.model.source ?? "Public"} average draft position`}>{formatAdp(availabilityData?.players[player.id]?.adp)}</td>
                       <td className="numeric points">{modeled ? formatPoints(player.projectedPoints) : "—"}</td>
                       <td className={`numeric value ${value >= 0 ? "positive" : ""}`}>{modeled ? formatSigned(value) : "—"}</td>
                       <td className={`numeric risk ${excessVolatility >= 0 ? "positive" : "negative"}`} title={modeled ? `Raw σ ${formatPoints(rawVolatility)} · Expected σ ${formatPoints(expectedVolatility)} · P10 ${formatPoints(player.projectedP10)} · P90 ${formatPoints(player.projectedP90)}` : "No model projection for this position"}>{modeled ? formatSigned(excessVolatility) : "—"}</td>
@@ -858,7 +1234,7 @@ export default function DraftRoom() {
             {!available.length && <div className="empty-state">No available players match those filters.</div>}
           </div>
           <div className={`draft-dock ${selectedPlayer ? "has-player" : ""}`}>
-            {selectedPlayer ? <><div><span>Selected</span><strong>{selectedPlayer.name}</strong><small>{hasModelProjection(selectedPlayer) ? `${selectedPlayer.position}${selectedPlayer.positionRank} · ${selectedPlayer.nflTeam} · ${formatPoints(selectedPlayer.projectedPoints)} pts · P90 ${formatPoints(selectedPlayer.projectedP90)} · Ceiling VOR ${formatSigned(selectedCeilingValue)} · Risk+ ${formatSigned(selectedExcessVolatility)}` : `${selectedPlayer.position === "DST" ? "D/ST" : selectedPlayer.position} · ${selectedPlayer.nflTeam} · No model projection`}{selectedAvailabilitySummary ? ` · ${selectedAvailabilitySummary}` : ""}{selectedDraftIssue ? ` · ${selectedDraftIssue}` : ""}</small></div><button className="primary-button" type="button" onClick={() => draftPlayer()} disabled={isComplete || Boolean(selectedDraftIssue)}>{selectedDraftIssue ?? `Draft to ${currentTeam}`} <span>{selectedDraftIssue ? "!" : "→"}</span></button></> : <p>Select a player from the board to make the next pick.</p>}
+            {selectedPlayer ? <><div><span>Selected</span><strong>{selectedPlayer.name}</strong><small>{hasModelProjection(selectedPlayer) ? `${selectedPlayer.position}${selectedPlayer.positionRank} · ${selectedPlayer.nflTeam} · ${formatPoints(selectedPlayer.projectedPoints)} pts · P90 ${formatPoints(selectedPlayer.projectedP90)} · Ceiling VOR ${formatSigned(selectedCeilingValue)} · Risk+ ${formatSigned(selectedExcessVolatility)}` : `${selectedPlayer.position === "DST" ? "D/ST" : selectedPlayer.position} · ${selectedPlayer.nflTeam} · No model projection`}{selectedAvailabilitySummary ? ` · ${selectedAvailabilitySummary}` : ""}{selectedDraftIssue ? ` · ${selectedDraftIssue}` : ""}</small></div><button className="primary-button" type="button" onClick={() => draftPlayer()} disabled={isComplete || isSimulating || Boolean(selectedDraftIssue)}>{isSimulating ? "Simulating to focus team…" : selectedDraftIssue ?? `Draft to ${currentTeam}`} <span>{selectedDraftIssue ? "!" : "→"}</span></button></> : <p>{isSimulating ? `Simulating picks until ${teams[primaryFocusTeam]} is on the clock…` : "Select a player from the board to make the next pick."}</p>}
           </div>
         </div>
 
@@ -885,12 +1261,12 @@ export default function DraftRoom() {
           </section>
 
           <section className="recent-card">
-            <div className="rail-heading"><div><p className="eyebrow">Draft log</p><h2>Recent picks</h2></div><button type="button" onClick={undoPick} disabled={!picks.length}>↶ Undo</button></div>
-            <div className="recent-list">
+            <div className="rail-heading"><div><p className="eyebrow">Draft log</p><h2>Recent picks</h2></div><button type="button" onClick={undoPick} disabled={!canUndo}>{mockMode ? "↶ Revert last pick" : "↶ Undo"}</button></div>
+            <div className="recent-list" role="region" aria-label="Complete draft pick history">
               {recentPicks.length ? recentPicks.map((pick) => {
                 const player = playerById.get(pick.playerId);
                 if (!player) return null;
-                return <div className="recent-pick" key={pick.overall}><span>{pick.overall}</span><div><strong>{player.name}</strong><small>{teams[pick.teamIndex]}</small></div><b className={`pos-text-${player.position.toLowerCase()}`}>{player.position === "DST" ? "D/ST" : player.position}</b></div>;
+                return <div className={`recent-pick ${pick.simulated ? "simulated" : ""}`} key={pick.overall}><span>{pick.overall}</span><div><strong>{player.name}</strong><small>{teams[pick.teamIndex]}{pick.simulated ? " · Simulated" : " · Focus pick"}</small></div><b className={`pos-text-${player.position.toLowerCase()}`}>{player.position === "DST" ? "D/ST" : player.position}</b></div>;
               }) : <p className="recent-empty">The first pick is waiting.</p>}
             </div>
           </section>
@@ -921,8 +1297,8 @@ export default function DraftRoom() {
           </header>
 
           <div className="player-modal-tabs" role="tablist" aria-label={`${detailPlayer.name} performance views`}>
-            <button id="season-history-tab" type="button" role="tab" aria-selected={detailTab === "seasons"} aria-controls="season-history-panel" className={detailTab === "seasons" ? "active" : ""} onClick={() => setDetailTab("seasons")}>Season history</button>
-            <button id="game-log-tab" type="button" role="tab" aria-selected={detailTab === "games"} aria-controls="game-log-panel" className={detailTab === "games" ? "active" : ""} onClick={() => setDetailTab("games")}>2025 game log</button>
+            <button id="season-history-tab" type="button" role="tab" aria-selected={detailTab === "seasons"} aria-controls="season-history-panel" className={detailTab === "seasons" ? "active" : ""} onClick={() => showHistoryTab("seasons")}>Season history</button>
+            <button id="game-log-tab" type="button" role="tab" aria-selected={detailTab === "games"} aria-controls="game-log-panel" className={detailTab === "games" ? "active" : ""} onClick={() => showHistoryTab("games")}>2025 game log</button>
             <button id="model-interpretability-tab" type="button" role="tab" aria-selected={detailTab === "model"} aria-controls="model-interpretability-panel" className={detailTab === "model" ? "active" : ""} onClick={showModelInterpretability}>Model drivers</button>
           </div>
 

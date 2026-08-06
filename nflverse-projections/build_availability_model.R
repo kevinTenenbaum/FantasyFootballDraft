@@ -128,13 +128,10 @@ if (is.null(payload$meta) || is.null(payload$players)) {
 }
 
 meta <- as.list(payload$meta)
-if (
-  as.integer(meta$teams) != team_count ||
-    as.integer(meta$rounds) != draft_rounds
-) {
+if (as.integer(meta$teams) != team_count) {
   stop(
     "Public ADP settings do not match the requested league: received ",
-    meta$teams, " teams and ", meta$rounds, " rounds.",
+    meta$teams, " teams instead of ", team_count, ".",
     call. = FALSE
   )
 }
@@ -171,6 +168,9 @@ availability$source_url <- request_url
 availability$source_total_drafts <- as.integer(meta$total_drafts)
 availability$source_start_date <- as.character(meta$start_date)
 availability$source_end_date <- as.character(meta$end_date)
+availability$source_rounds <- as.integer(meta$rounds)
+availability$calibration_method <- "slot_position_frequency"
+availability$calibration_pool_size <- nrow(prepare_public_adp(payload$players))
 availability$availability_probability <- round(
   availability$availability_probability,
   6L
@@ -178,7 +178,8 @@ availability$availability_probability <- round(
 
 leading_columns <- c(
   "season", "scoring_format", "teams", "rounds", "source",
-  "source_url", "source_total_drafts", "source_start_date", "source_end_date"
+  "source_url", "source_total_drafts", "source_start_date", "source_end_date",
+  "source_rounds", "calibration_method", "calibration_pool_size"
 )
 availability <- availability[c(
   leading_columns,
@@ -197,4 +198,6 @@ cat("Matched ", matched_players, " players to ", source_name,
     " players absent from public ADP remain at probability 1.\n", sep = "")
 cat("Source window: ", meta$start_date, " through ", meta$end_date,
     " (", meta$total_drafts, " drafts).\n", sep = "")
+cat("Modeled league: ", team_count, " teams and ", draft_rounds,
+    " rounds; source sample uses ", meta$rounds, " rounds.\n", sep = "")
 cat("Output: ", normalizePath(output_path, mustWork = FALSE), "\n", sep = "")

@@ -3,12 +3,12 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Draft Room | Fantasy Football",
-  description: "A live fantasy football draft board powered by custom projections.",
+  description: "A live fantasy football draft board with fractional recommendations and shared-scenario roster outcomes.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
   openGraph: {
     title: "Draft Room",
-    description: "Build the board. Make the pick. Track every roster.",
-    images: ["/og.png"],
+    description: "Make the pick. See the complete-roster paths.",
+    images: ["/og-optimization.png"],
   },
 };
 

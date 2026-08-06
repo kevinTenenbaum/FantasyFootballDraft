@@ -50,6 +50,32 @@ position-specific linear models. Each bar is an input value multiplied by its
 fitted coefficient, including factor levels and interaction terms, and the bars
 are checked to sum back to the player’s 2026 mean projection.
 
+Refresh the calibrated 12-team, 16-round availability curves after rebuilding
+the public ADP model:
+
+```sh
+Rscript scripts/export_availability.R
+```
+
+The live board conditions each future probability on the player still being
+available at the current pick. New drafts must match the model's team count and
+round count; otherwise availability remains paused instead of showing estimates
+from an incompatible league.
+
+Live drafts support one or two focus teams. When two are selected, the
+availability columns automatically follow the team with the earlier upcoming
+pick, and the recommendation board activates whenever either focus team is on
+the clock. Mock draft mode intentionally supports one focus team so simulated
+opponent picks cannot skip a managed roster.
+
+When the focus team is on the clock in Rounds 1–14, the recommendation board
+screens the top three projected QB, RB, WR, and TE options. It ranks the best
+six complete-roster paths by their fractional availability value, then reports
+the mean, 10th percentile, worst-decile mean, and chance of leaving the draft
+with two viable running backs across 500 shared survivor-board scenarios. The
+calculation runs in a web worker so the player board stays responsive, and any
+recommended player can be drafted directly from the recommendation row.
+
 ## Run locally
 
 ```sh
